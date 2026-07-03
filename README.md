@@ -8,11 +8,16 @@
 - **`bfsextract`** does the inverse: it reads a BFS image and reconstructs its
   tree into a destination directory, restoring contents, symlinks, permissions,
   timestamps, and, on Haiku, attributes.
+- **`bfscheck`** is a read-only integrity checker (a check-only `checkfs`): it
+  validates the superblock, bitmap, inodes, data streams, and B+trees, reporting
+  all findings without stopping on the first.
+- **`bfsresize`** grows or shrinks a BFS image in place, crash-safely via a
+  sidecar redo-journal.
 - **`bfscheck`** verifies the integrity of a BFS image (read-only), reporting
   every problem it finds without stopping and without modifying the image.
 
 Both work with the on-disk layout described in
-[`local/BFS_On-Disk_Format.md`](local/BFS_On-Disk_Format.md). No Haiku driver
+[`docs/BFS_On-Disk_Format.md`](local/BFS_On-Disk_Format.md). No Haiku driver
 source is consulted. On non-Haiku POSIX platforms, attributes are ignored in
 both directions; on Haiku they are preserved.
 
@@ -117,6 +122,41 @@ Exit status: `0` clean, `1` problems found, `2` could not open/parse.
 
 ```sh
 bfscheck payload.bfs
+```
+
+### `bfsresize`
+
+```
+bfsresize [options] <image> <new-size>
+
+  -n, --dry-run   report the plan without modifying the image
+  -v, --verbose   verbose output
+  -h, --help
+```
+
+`bfsresize` grows or shrinks a BFS image in place (`<new-size>` in bytes, with
+K/M/G suffixes, rounded down to a block multiple; `ag_shift` is held fixed). It
+is **crash-safe**: every on-disk change is applied through a sidecar redo-journal
+(`<image>.bfsresize-journal`) with fsync barriers, and the file is only truncated
+after the superblock commit is durable — so an interruption always leaves a
+mountable volume (the old size until the final commit), and the transaction is
+replayed automatically on the next run. A dirty (uncleanly unmounted) volume is
+refused.
+
+Supported today:
+
+- **Grow** within a bitmap-block band (no new bitmap blocks needed).
+- **Shrink** when the freed tail is unused — including across a bitmap-block
+  boundary, where the empty log is relocated to keep the reserved region a
+  contiguous prefix (as Haiku's allocator requires).
+
+Not yet implemented (refused with a clear message, image untouched): shrinking
+past used blocks (relocating live data — the "moved blocks" path) and growing
+across a bitmap-block boundary.
+
+```sh
+bfsresize data.bfs 64M          # grow to 64 MiB
+bfsresize --dry-run data.bfs 32M
 ```
 
 ## What gets written

@@ -41,3 +41,15 @@ bfscheck_sources = [
 
 executable('bfscheck', bfscheck_sources,
 	install : true)
+
+
+bfsresize_sources = [
+	'src/ImageFile.cpp',
+	'src/BfsReader.cpp',
+	'src/ResizeJournal.cpp',
+	'src/Resizer.cpp',
+	'src/resize_main.cpp',
+]
+
+executable('bfsresize', bfsresize_sources,
+	install : true)

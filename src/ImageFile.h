@@ -14,10 +14,17 @@ namespace bfs {
 // (which is exactly what the free areas of a fresh BFS volume require).
 class ImageFile {
 public:
+	enum class Access {
+		ReadOnly,
+		ReadWrite,
+	};
+
 	// Create a new image of the given size for writing (used by makebfs).
 	ImageFile(const std::string &path, uint64_t sizeBytes, uint32_t blockSize);
-	// Open an existing image read-only (used by bfsextract).
+	// Open an existing image read-only (used by bfsextract / bfscheck).
 	explicit ImageFile(const std::string &path);
+	// Open an existing image with the given access (used by bfsresize).
+	ImageFile(const std::string &path, Access access);
 	~ImageFile();
 
 	ImageFile(const ImageFile &) = delete;
@@ -34,6 +41,9 @@ public:
 
 	// Read an arbitrary byte range from an absolute offset.
 	void ReadAt(uint64_t offset, uint8_t *data, size_t length);
+
+	// Change the file length (grow or shrink the backing file).
+	void Truncate(uint64_t sizeBytes);
 
 	void Flush();
 

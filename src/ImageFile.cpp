@@ -52,11 +52,42 @@ ImageFile::ImageFile(const std::string &path):
 }
 
 
+ImageFile::ImageFile(const std::string &path, Access access):
+	fPath(path)
+{
+	int flags = access == Access::ReadWrite ? O_RDWR : O_RDONLY;
+	fFd = ::open(path.c_str(), flags);
+	if (fFd < 0) {
+		throw std::system_error(errno, std::generic_category(),
+			"cannot open image file " + path);
+	}
+	struct stat info;
+	if (::fstat(fFd, &info) != 0) {
+		int err = errno;
+		::close(fFd);
+		fFd = -1;
+		throw std::system_error(err, std::generic_category(),
+			"cannot stat image file " + path);
+	}
+	fSize = static_cast<uint64_t>(info.st_size);
+}
+
+
 ImageFile::~ImageFile()
 {
 	if (fFd >= 0) {
 		::close(fFd);
 	}
+}
+
+
+void ImageFile::Truncate(uint64_t sizeBytes)
+{
+	if (::ftruncate(fFd, static_cast<off_t>(sizeBytes)) != 0) {
+		throw std::system_error(errno, std::generic_category(),
+			"cannot resize image file " + fPath);
+	}
+	fSize = sizeBytes;
 }
 
 
