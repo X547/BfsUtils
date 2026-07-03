@@ -1,7 +1,6 @@
-# BfsUtils — `makebfs` and `bfsextract`
+# BfsUtils — `makebfs`, `bfsextract`, `bfscheck`
 
-**BfsUtils** is a pair of filesystem-aware archiver tools for **BFS** (the Be
-File System):
+**BfsUtils** is a set of filesystem-aware tools for **BFS** (the Be File System):
 
 - **`makebfs`** generates a fresh, mountable BFS image from a directory tree —
   every file, directory, and symlink under a source directory, plus the standard
@@ -9,6 +8,8 @@ File System):
 - **`bfsextract`** does the inverse: it reads a BFS image and reconstructs its
   tree into a destination directory, restoring contents, symlinks, permissions,
   timestamps, and, on Haiku, attributes.
+- **`bfscheck`** verifies the integrity of a BFS image (read-only), reporting
+  every problem it finds without stopping and without modifying the image.
 
 Both work with the on-disk layout described in
 [`local/BFS_On-Disk_Format.md`](local/BFS_On-Disk_Format.md). No Haiku driver
@@ -86,6 +87,36 @@ overlay before extraction.
 ```sh
 # Round-trips with makebfs
 makebfs ./payload payload.bfs && bfsextract payload.bfs ./restored
+```
+
+### `bfscheck`
+
+```
+bfscheck [options] <image>
+
+      --scan-orphans   scan all blocks for in-use inodes unreachable from the
+                       root (classifies leaked allocated blocks)
+      --replay-log     check the post-replay state of an unclean volume
+      --strict         treat warnings as failures too
+  -v, --verbose        verbose output
+  -h, --help
+```
+
+`bfscheck` walks the volume and reports integrity problems **without stopping on
+the first error** and **without modifying the image**. It checks: superblock
+magic/geometry coherence; the block bitmap against actual usage (referenced-but-
+free, allocated-but-unreferenced, `used_blocks` count); `block_run` validity and
+out-of-bounds/cross-linked blocks; inode magic, `inode_num`/parent consistency,
+and type-bit coherence; data-stream coverage across all three tiers; B+tree
+structure, key ordering, separator bounds, and duplicate structures (directory,
+index, and attribute trees); and directory `.`/`..` presence and correctness.
+Findings are printed inline (capped per category) with a final summary. Index
+**structure** is checked, but index-vs-data content coherence is out of scope.
+
+Exit status: `0` clean, `1` problems found, `2` could not open/parse.
+
+```sh
+bfscheck payload.bfs
 ```
 
 ## What gets written

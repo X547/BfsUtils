@@ -72,6 +72,7 @@ public:
 	BlockRun RootDirectory() const {return fRootDir;}
 	BlockRun IndexDirectory() const {return fIndices;}
 	const std::string &VolumeName() const {return fName;}
+	int64_t UsedBlocks() const {return fUsedBlocks;}
 	bool IsClean() const {return fLogStart == fLogEnd;}
 
 	// Replay the journal into the overlay so subsequent reads observe the
@@ -89,8 +90,17 @@ public:
 	std::vector<DirEntry> ReadDirectory(const Inode &inode);
 	std::vector<Attribute> ReadAttributes(const Inode &inode);
 
-private:
+	// Raw block read (consults the journal overlay). Exposed for the integrity
+	// checker, which needs low-level access beyond the high-level readers.
 	void ReadBlock(int64_t block, uint8_t *out);
+
+	// Reserved-region size in blocks: boot block + bitmap + log.
+	int64_t ReservedBlocks() const
+	{
+		return 1 + fGeometry.bitmapBlocks + fGeometry.logBlocks.length;
+	}
+
+private:
 	std::vector<uint8_t> ReadRun(const BlockRun &run);
 	BlockRun ResolveRun(const DataStreamInfo &stream, int64_t pos, int64_t &runStart);
 	void ReadSmallData(const Inode &inode, std::vector<Attribute> &out);
@@ -102,6 +112,7 @@ private:
 	BlockRun fIndices;
 	int64_t fLogStart = 0;
 	int64_t fLogEnd = 0;
+	int64_t fUsedBlocks = 0;
 	std::string fName;
 	std::map<int64_t, std::vector<uint8_t>> fOverlay;
 };

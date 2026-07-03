@@ -29,3 +29,15 @@ bfsextract_sources = [
 
 executable('bfsextract', bfsextract_sources,
 	install : true)
+
+
+bfscheck_sources = [
+	'src/ImageFile.cpp',
+	'src/BfsReader.cpp',
+	'src/Findings.cpp',
+	'src/Checker.cpp',
+	'src/check_main.cpp',
+]
+
+executable('bfscheck', bfscheck_sources,
+	install : true)

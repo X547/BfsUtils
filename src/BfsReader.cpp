@@ -60,6 +60,7 @@ BfsReader::BfsReader(ImageFile &image):
 	int64_t bitsPerBlock = static_cast<int64_t>(fGeometry.blockSize) * 8;
 	fGeometry.bitmapBlocks = (fGeometry.numBlocks + bitsPerBlock - 1) / bitsPerBlock;
 
+	fUsedBlocks = GetS64(sb + super::kUsedBlocks);
 	fLogStart = GetS64(sb + super::kLogStart);
 	fLogEnd = GetS64(sb + super::kLogEnd);
 	fRootDir = GetBlockRun(sb + super::kRootDir);
