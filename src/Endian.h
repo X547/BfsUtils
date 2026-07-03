@@ -52,6 +52,25 @@ inline void PutS64(uint8_t *p, int64_t v)
 }
 
 
+inline uint16_t GetU16(const uint8_t *p)
+{
+	return static_cast<uint16_t>(p[0] | (p[1] << 8));
+}
+
+
+inline uint32_t GetU32(const uint8_t *p)
+{
+	return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+		| (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+
+inline int32_t GetS32(const uint8_t *p)
+{
+	return static_cast<int32_t>(GetU32(p));
+}
+
+
 inline uint64_t GetU64(const uint8_t *p)
 {
 	uint64_t v = 0;

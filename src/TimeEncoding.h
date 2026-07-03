@@ -32,4 +32,16 @@ inline int64_t EncodeTime(int64_t seconds, uint32_t nanoseconds)
 }
 
 
+// Decode a BFS-encoded time value back into seconds and nanoseconds.
+inline void DecodeTime(int64_t encoded, int64_t &seconds, uint32_t &nanoseconds)
+{
+	seconds = encoded >> kInodeTimeShift;
+	if ((encoded & 0xf000) == 0xf000) {
+		nanoseconds = 0;
+	} else {
+		nanoseconds = static_cast<uint32_t>((encoded & kInodeTimeMask) << 14);
+	}
+}
+
+
 } // bfs

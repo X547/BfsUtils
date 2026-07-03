@@ -14,13 +14,17 @@ namespace bfs {
 // (which is exactly what the free areas of a fresh BFS volume require).
 class ImageFile {
 public:
+	// Create a new image of the given size for writing (used by makebfs).
 	ImageFile(const std::string &path, uint64_t sizeBytes, uint32_t blockSize);
+	// Open an existing image read-only (used by bfsextract).
+	explicit ImageFile(const std::string &path);
 	~ImageFile();
 
 	ImageFile(const ImageFile &) = delete;
 	ImageFile &operator=(const ImageFile &) = delete;
 
 	uint32_t BlockSize() const {return fBlockSize;}
+	uint64_t Size() const {return fSize;}
 
 	// Write one full block (fBlockSize bytes) at the given block number.
 	void WriteBlock(int64_t blockNumber, const uint8_t *data);
@@ -28,11 +32,15 @@ public:
 	// Write an arbitrary byte range at an absolute offset.
 	void WriteAt(uint64_t offset, const uint8_t *data, size_t length);
 
+	// Read an arbitrary byte range from an absolute offset.
+	void ReadAt(uint64_t offset, uint8_t *data, size_t length);
+
 	void Flush();
 
 private:
 	int fFd = -1;
 	uint32_t fBlockSize = 0;
+	uint64_t fSize = 0;
 	std::string fPath;
 };
 

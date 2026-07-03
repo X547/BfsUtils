@@ -17,3 +17,15 @@ makebfs_sources = [
 
 executable('makebfs', makebfs_sources,
 	install : true)
+
+
+bfsextract_sources = [
+	'src/ImageFile.cpp',
+	'src/BfsReader.cpp',
+	'src/AttributeWriter.cpp',
+	'src/Extractor.cpp',
+	'src/extract_main.cpp',
+]
+
+executable('bfsextract', bfsextract_sources,
+	install : true)

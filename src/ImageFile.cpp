@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <stdexcept>
@@ -31,10 +32,51 @@ ImageFile::ImageFile(const std::string &path, uint64_t sizeBytes, uint32_t block
 }
 
 
+ImageFile::ImageFile(const std::string &path):
+	fPath(path)
+{
+	fFd = ::open(path.c_str(), O_RDONLY);
+	if (fFd < 0) {
+		throw std::system_error(errno, std::generic_category(),
+			"cannot open image file " + path);
+	}
+	struct stat info;
+	if (::fstat(fFd, &info) != 0) {
+		int err = errno;
+		::close(fFd);
+		fFd = -1;
+		throw std::system_error(err, std::generic_category(),
+			"cannot stat image file " + path);
+	}
+	fSize = static_cast<uint64_t>(info.st_size);
+}
+
+
 ImageFile::~ImageFile()
 {
 	if (fFd >= 0) {
 		::close(fFd);
+	}
+}
+
+
+void ImageFile::ReadAt(uint64_t offset, uint8_t *data, size_t length)
+{
+	size_t read = 0;
+	while (read < length) {
+		ssize_t n = ::pread(fFd, data + read, length - read,
+			static_cast<off_t>(offset + read));
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			throw std::system_error(errno, std::generic_category(),
+				"read from image failed");
+		}
+		if (n == 0) {
+			throw std::runtime_error("unexpected end of image file");
+		}
+		read += static_cast<size_t>(n);
 	}
 }
 

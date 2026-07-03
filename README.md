@@ -1,13 +1,19 @@
-# BfsUtils — `makebfs`
+# BfsUtils — `makebfs` and `bfsextract`
 
-`makebfs` generates a fresh, mountable **BFS** (Be File System) image from a
-directory tree, like a filesystem-aware archiver. It produces a clean volume
-containing every file, directory, and symlink under a source directory, builds
-the standard BFS indices, and — on Haiku — archives each node's BFS attributes.
+**BfsUtils** is a pair of filesystem-aware archiver tools for **BFS** (the Be
+File System):
 
-The on-disk layout is written strictly from the format description in
+- **`makebfs`** generates a fresh, mountable BFS image from a directory tree —
+  every file, directory, and symlink under a source directory, plus the standard
+  BFS indices and, on Haiku, each node's attributes.
+- **`bfsextract`** does the inverse: it reads a BFS image and reconstructs its
+  tree into a destination directory, restoring contents, symlinks, permissions,
+  timestamps, and, on Haiku, attributes.
+
+Both work with the on-disk layout described in
 [`local/BFS_On-Disk_Format.md`](local/BFS_On-Disk_Format.md). No Haiku driver
-source is consulted.
+source is consulted. On non-Haiku POSIX platforms, attributes are ignored in
+both directions; on Haiku they are preserved.
 
 ## Building
 
@@ -55,6 +61,32 @@ makebfs -s 64M -n Data ./payload data.bfs
 By default the image is the smallest volume the content fits into, so the
 resulting volume is essentially full (`used_blocks == num_blocks`). Use
 `--size` to leave free space for a writable volume.
+
+### `bfsextract`
+
+```
+bfsextract [options] <image> <output-directory>
+
+      --no-attributes  do not restore BFS attributes (Haiku only)
+      --no-owner       do not restore uid/gid ownership
+      --replay-log     replay the journal if the volume is not clean
+  -v, --verbose        print each extracted path
+  -h, --help
+```
+
+`bfsextract` walks the volume's directory tree (ignoring the internal indices)
+and writes each file, directory, and symlink to `output-directory`, then
+restores permissions, modification time, best-effort ownership, and — on Haiku —
+attributes (from both the inline `small_data` region and attribute directories).
+The reader resolves all three data-stream tiers (direct, indirect,
+double-indirect). A volume with a non-empty journal is rejected unless
+`--replay-log` is given, in which case the log is replayed into an in-memory
+overlay before extraction.
+
+```sh
+# Round-trips with makebfs
+makebfs ./payload payload.bfs && bfsextract payload.bfs ./restored
+```
 
 ## What gets written
 

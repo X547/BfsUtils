@@ -202,6 +202,16 @@ inline void PutBlockRun(uint8_t *p, const BlockRun &run)
 }
 
 
+inline BlockRun GetBlockRun(const uint8_t *p)
+{
+	BlockRun run;
+	run.group = GetS32(p + 0);
+	run.start = GetU16(p + 4);
+	run.length = GetU16(p + 6);
+	return run;
+}
+
+
 inline int64_t KeyAlign(int64_t x)
 {
 	return (x + 7) & ~static_cast<int64_t>(7);

@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "Attribute.h"
+
 
 namespace bfs {
 
@@ -20,15 +22,6 @@ enum class NodeKind {
 struct ScanTime {
 	int64_t seconds = 0;
 	uint32_t nanoseconds = 0;
-};
-
-
-// A BFS attribute read from the source (Haiku only). 'type' is the BFS/BeOS
-// type code as returned by the attribute API and is copied through verbatim.
-struct Attribute {
-	std::string name;
-	uint32_t type = 0;
-	std::vector<uint8_t> data;
 };
 
 
