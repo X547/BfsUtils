@@ -30,6 +30,13 @@ public:
 	// kMaxBlockRunLength, as required by block_run validity.
 	std::vector<BlockRun> AllocateStream(int64_t blockCount);
 
+	// Like AllocateStream but stops once 'maxRuns' runs have been produced even if
+	// blocks remain. Sets 'blocksConsumed' to how many blocks were actually
+	// allocated. Used to fill the direct+indirect tiers, leaving any overflow for
+	// the double-indirect tier.
+	std::vector<BlockRun> AllocateStreamCapped(int64_t blockCount, int64_t maxRuns,
+		int64_t &blocksConsumed);
+
 	int64_t Cursor() const {return fCursor;}
 	int64_t UsedBlocks() const {return fCursor;}
 

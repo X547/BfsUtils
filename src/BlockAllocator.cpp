@@ -58,11 +58,23 @@ int64_t BlockAllocator::Allocate(int64_t count)
 
 std::vector<BlockRun> BlockAllocator::AllocateStream(int64_t blockCount)
 {
+	int64_t consumed = 0;
+	return AllocateStreamCapped(blockCount, -1, consumed);
+}
+
+
+std::vector<BlockRun> BlockAllocator::AllocateStreamCapped(int64_t blockCount,
+	int64_t maxRuns, int64_t &blocksConsumed)
+{
 	std::vector<BlockRun> runs;
 	int64_t groupSize = fGeometry.BlocksPerGroup();
 	int64_t remaining = blockCount;
+	blocksConsumed = 0;
 
 	while (remaining > 0) {
+		if (maxRuns >= 0 && static_cast<int64_t>(runs.size()) >= maxRuns) {
+			break;
+		}
 		int64_t start = fCursor;
 		int64_t offsetInGroup = start & (groupSize - 1);
 		int64_t toGroupEnd = groupSize - offsetInGroup;
@@ -72,6 +84,7 @@ std::vector<BlockRun> BlockAllocator::AllocateStream(int64_t blockCount)
 		runs.push_back(fGeometry.ToRun(start, static_cast<uint16_t>(chunk)));
 		fCursor += chunk;
 		remaining -= chunk;
+		blocksConsumed += chunk;
 	}
 
 	return runs;

@@ -228,10 +228,6 @@ noted. They are the first things to check if a volume fails to mount.
 
 ## Current limitations
 
-- **Data streams use the direct tier only** (up to 12 runs). With the compact,
-  contiguous layout this produces, that covers very large files (over 1 GiB on
-  typical geometry); a file needing more runs is rejected with a clear error.
-  Indirect / double-indirect support is a planned addition.
 - **Duplicate index keys use full duplicate nodes**, not fragment packing — a
   correct but not maximally compact choice.
 - POSIX builds archive data and the standard indices only; BFS attributes are

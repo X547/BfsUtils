@@ -34,6 +34,13 @@ constexpr uint32_t kMaxBlockRunLength = 65535;
 constexpr uint32_t kInodeMagic1 = 0x3bbe0ad9;
 constexpr int kShortSymlinkNameLength = 144;
 constexpr int kNumDirectBlocks = 12;
+
+// data_stream indirect / double-indirect array sizing (see BFS_On-Disk_Format.md
+// section 7). The double-indirect tier stores fixed-length runs of
+// 'double_indirect.length' (== base) blocks each.
+constexpr int kNumArrayBlocks = 4;
+constexpr int kDoubleIndirectArraySize = 4096;
+
 constexpr int kInodeTimeShift = 16;
 constexpr uint32_t kInodeTimeMask = 0xfff0;
 

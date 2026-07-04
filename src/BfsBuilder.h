@@ -9,6 +9,7 @@
 
 #include "BPlusTreeBuilder.h"
 #include "BfsFormat.h"
+#include "DataStream.h"
 #include "Geometry.h"
 #include "Node.h"
 
@@ -73,7 +74,8 @@ private:
 		std::shared_ptr<BPlusTreeBuilder> tree;
 		std::vector<std::vector<int>> treeGroups;
 
-		std::vector<BlockRun> runs;
+		int64_t metadataBlocks = 0;   // reserved array/alignment blocks (indirect tiers)
+		StreamLayout layout;
 	};
 
 	int NewInode();
@@ -84,6 +86,7 @@ private:
 	int PlanIndex(const std::string &name, uint32_t dataType, uint32_t modeTypeBit,
 		int parentPlan, std::vector<std::pair<std::vector<uint8_t>, Node *>> &inputs);
 
+	int64_t DataBlocks(const InodePlan &plan) const;
 	int64_t StreamBlocks(const InodePlan &plan) const;
 	void ComputeGeometry();
 	void Place(BlockAllocator &allocator);
@@ -98,6 +101,7 @@ private:
 
 	BuildOptions fOptions;
 	Geometry fGeometry;
+	StreamTuning fTuning;
 	std::vector<InodePlan> fInodes;
 	std::vector<Node *> fContentNodes;   // every scanned node except the root
 	int fRootPlan = -1;

@@ -94,6 +94,47 @@ void WriteBytesStream(ImageFile &image, const Geometry &geometry,
 }
 
 
+// Write one contiguous array run (indirect array, double-indirect top array, or a
+// second-level array) filled with 'count' block_run entries and zero-padded.
+void WriteRunArray(ImageFile &image, const Geometry &geometry,
+	const BlockRun &arrayRun, const BlockRun *entries, size_t count)
+{
+	uint32_t blockSize = geometry.blockSize;
+	std::vector<uint8_t> buffer(static_cast<size_t>(arrayRun.length) * blockSize, 0);
+	for (size_t i = 0; i < count; i++) {
+		PutBlockRun(buffer.data() + i * 8, entries[i]);
+	}
+	int64_t start = geometry.ToBlock(arrayRun);
+	for (uint16_t b = 0; b < arrayRun.length; b++) {
+		image.WriteBlock(start + b, buffer.data() + static_cast<size_t>(b) * blockSize);
+	}
+}
+
+
+// Serialize the indirect / double-indirect array blocks referenced by a layout.
+void WriteArrayBlocks(ImageFile &image, const Geometry &geometry,
+	const StreamLayout &layout)
+{
+	if (!layout.indirect.IsZero()) {
+		WriteRunArray(image, geometry, layout.indirect,
+			layout.indirectEntries.data(), layout.indirectEntries.size());
+	}
+	if (!layout.doubleIndirect.IsZero()) {
+		WriteRunArray(image, geometry, layout.doubleIndirect,
+			layout.ddSecondArrays.data(), layout.ddSecondArrays.size());
+		int64_t entriesPerSecond = layout.base * (static_cast<int64_t>(geometry.blockSize) / 8);
+		size_t total = layout.ddDataRuns.size();
+		for (size_t s = 0; s < layout.ddSecondArrays.size(); s++) {
+			size_t offset = static_cast<size_t>(s * entriesPerSecond);
+			size_t remaining = offset < total ? total - offset : 0;
+			size_t count = std::min(remaining, static_cast<size_t>(entriesPerSecond));
+			WriteRunArray(image, geometry, layout.ddSecondArrays[s],
+				layout.ddDataRuns.data() + offset, count);
+		}
+	}
+}
+
+
 void WriteFileStream(ImageFile &image, const Geometry &geometry,
 	const std::vector<BlockRun> &runs, const std::string &path, uint64_t size)
 {
@@ -484,13 +525,21 @@ void BfsBuilder::PlanIndices()
 }
 
 
-int64_t BfsBuilder::StreamBlocks(const InodePlan &plan) const
+int64_t BfsBuilder::DataBlocks(const InodePlan &plan) const
 {
 	if (plan.streamKind == StreamKind::None
 		|| plan.streamKind == StreamKind::ShortSymlink) {
 		return 0;
 	}
 	return StreamBlockCount(plan.streamSize, fOptions.blockSize);
+}
+
+
+int64_t BfsBuilder::StreamBlocks(const InodePlan &plan) const
+{
+	// Data blocks plus the indirect/double-indirect array + alignment blocks
+	// reserved for this stream (filled in after the provisional geometry pass).
+	return DataBlocks(plan) + plan.metadataBlocks;
 }
 
 
@@ -580,10 +629,13 @@ void BfsBuilder::Place(BlockAllocator &allocator)
 		plan.block = allocator.Allocate(1);
 	}
 	for (InodePlan &plan : fInodes) {
-		int64_t blocks = StreamBlocks(plan);
-		if (blocks > 0) {
-			plan.runs = allocator.AllocateStream(blocks);
+		int64_t data = DataBlocks(plan);
+		if (plan.streamKind == StreamKind::None
+			|| plan.streamKind == StreamKind::ShortSymlink) {
+			continue;
 		}
+		plan.layout = BuildStreamLayout(allocator, fGeometry, data, plan.streamSize,
+			fTuning);
 	}
 }
 
@@ -637,7 +689,7 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 			::memcpy(p + inode::kData, plan.shortSymlink.data(), n);
 		}
 	} else {
-		WriteDataStream(p + inode::kData, fGeometry, plan.runs, plan.streamSize);
+		WriteDataStream(p + inode::kData, fGeometry, plan.layout);
 	}
 
 	PutS64(p + inode::kStatusChangeTime,
@@ -653,18 +705,22 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 
 	image.WriteBlock(plan.block, buffer.data());
 
+	// Indirect / double-indirect array blocks (empty for direct-only streams).
+	WriteArrayBlocks(image, fGeometry, plan.layout);
+
+	std::vector<BlockRun> dataRuns = plan.layout.DataRuns();
 	switch (plan.streamKind) {
 		case StreamKind::File:
-			WriteFileStream(image, fGeometry, plan.runs, plan.filePath, plan.streamSize);
+			WriteFileStream(image, fGeometry, dataRuns, plan.filePath, plan.streamSize);
 			break;
 		case StreamKind::Bytes:
-			WriteBytesStream(image, fGeometry, plan.runs, plan.bytes.data(),
+			WriteBytesStream(image, fGeometry, dataRuns, plan.bytes.data(),
 				plan.streamSize);
 			break;
 		case StreamKind::Tree: {
 			std::vector<uint8_t> treeBytes;
 			plan.tree->Serialize(treeBytes, TreeValues(plan));
-			WriteBytesStream(image, fGeometry, plan.runs, treeBytes.data(),
+			WriteBytesStream(image, fGeometry, dataRuns, treeBytes.data(),
 				treeBytes.size());
 			break;
 		}
@@ -714,6 +770,18 @@ void BfsBuilder::Build(Node &root, const std::string &outputPath)
 {
 	fRootPlan = PlanNode(root, -1, true);
 	PlanIndices();
+
+	// Provisional geometry (data only) fixes the block size and group geometry the
+	// indirect-tier reservation depends on; then reserve array/alignment blocks and
+	// recompute. A smaller provisional group size only over-estimates the reserved
+	// metadata, so the final geometry always has room and Place uses the exact
+	// amount (leaving any slack as free tail).
+	ComputeGeometry();
+	fTuning = StreamTuning::FromEnvironment(fGeometry);
+	for (InodePlan &plan : fInodes) {
+		plan.metadataBlocks = StreamMetadataUpperBound(fGeometry, DataBlocks(plan),
+			fTuning);
+	}
 	ComputeGeometry();
 
 	BlockAllocator allocator(fGeometry, FirstFreeBlock());
