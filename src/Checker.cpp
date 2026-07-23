@@ -117,6 +117,10 @@ public:
 			return;
 		}
 
+		// Per-level "previous node offset" state for sibling-link checking.
+		// Indexed by node depth (root == 0); sized past the depth guard below.
+		fPrevAtLevel.assign(128, kBPlusTreeNull);
+
 		KeyBound none;
 		ValidateNode(rootPointer, none, none, 0);
 	}
@@ -234,6 +238,9 @@ private:
 				Error("bad overflow_link");
 				return;
 			}
+			// Children live one level down; verify their sibling links as we
+			// walk them in key order (see CheckSiblingLinks).
+			int childDepth = depth + 1;
 			KeyBound previousBound = lower;
 			for (uint16_t k = 0; k < keyCount; k++) {
 				int64_t child = GetS64(values + k * sizeof(int64_t));
@@ -242,14 +249,56 @@ private:
 				separator.length = keyList[k].second;
 				separator.present = true;
 				if (ValidLink(child)) {
+					int64_t next = (k + 1 < keyCount)
+						? GetS64(values + (k + 1) * sizeof(int64_t))
+						: overflow;
+					CheckSiblingLinks(childDepth, child, next, k == 0);
 					ValidateNode(child, previousBound, separator, depth + 1);
 				} else {
 					Error("internal child link out of range");
 				}
 				previousBound = separator;
 			}
+			if (ValidLink(overflow)) {
+				// The rightmost child's right_link is checked from the next
+				// parent's first child, so pass next == 0 (no right check here).
+				CheckSiblingLinks(childDepth, overflow, 0, false);
+			}
 			ValidateNode(overflow, previousBound, upper, depth + 1);
 		}
+	}
+
+	// Every level of the tree is a doubly-linked list. Verify that 'child' (a node
+	// at 'childDepth') links to its in-order neighbours: its left_link must equal
+	// the previous node seen at this level, and its right_link must equal 'next'
+	// (its next sibling under the same parent; 0 means "not checked here"). When
+	// 'child' is the first child of a parent, also confirm the previous node's
+	// right_link reaches across the parent boundary to this node.
+	void CheckSiblingLinks(int childDepth, int64_t child, int64_t next,
+		bool isFirstChild)
+	{
+		int64_t prev = fPrevAtLevel[static_cast<size_t>(childDepth)];
+		const uint8_t *node = fTree.data() + child;
+		int64_t left = GetS64(node + btreenode::kLeftLink);
+		int64_t right = GetS64(node + btreenode::kRightLink);
+
+		if (isFirstChild && prev != kBPlusTreeNull) {
+			int64_t prevRight = GetS64(fTree.data() + prev + btreenode::kRightLink);
+			if (prevRight != child) {
+				Error("broken level chain: node's right_link does not reach the "
+					"next node at its level", prev);
+			}
+		}
+		if (left != prev) {
+			Error("broken level chain: node's left_link does not point to the "
+				"previous node at its level", child);
+		}
+		if (next != 0 && right != next) {
+			Error("broken level chain: node's right_link does not point to the "
+				"next node at its level", child);
+		}
+
+		fPrevAtLevel[static_cast<size_t>(childDepth)] = child;
 	}
 
 	void ValidateIndexValue(int64_t link)
@@ -292,6 +341,7 @@ private:
 	int64_t fNodeSize = 0;
 	int64_t fMaxSize = 0;
 	std::set<int64_t> fVisited;
+	std::vector<int64_t> fPrevAtLevel;   // per-depth last node offset (sibling chain)
 	std::vector<DirEntry> *fEntries = nullptr;
 };
 

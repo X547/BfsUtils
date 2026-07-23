@@ -114,15 +114,19 @@ void BPlusTreeBuilder::Finalize()
 
 	int leafCount = static_cast<int>(fNodes.size());
 
-	// Chain the leaves left-to-right for in-order iteration.
-	for (int j = 0; j < leafCount; j++) {
-		if (j > 0) {
-			fNodes[j].leftLink = NodeOffset(j - 1);
+	// Every level of a BFS B+tree is a doubly-linked list: each node's left/right
+	// links point to its siblings at the same level (not just the leaves). Haiku's
+	// checkfs validates these links at every level, so all levels must be chained.
+	auto chainLevel = [this](const std::vector<int> &nodes) {
+		for (size_t j = 0; j < nodes.size(); j++) {
+			if (j > 0) {
+				fNodes[nodes[j]].leftLink = NodeOffset(nodes[j - 1]);
+			}
+			if (j + 1 < nodes.size()) {
+				fNodes[nodes[j]].rightLink = NodeOffset(nodes[j + 1]);
+			}
 		}
-		if (j + 1 < leafCount) {
-			fNodes[j].rightLink = NodeOffset(j + 1);
-		}
-	}
+	};
 
 	// Build internal levels bottom-up.
 	std::vector<int> level;
@@ -130,6 +134,9 @@ void BPlusTreeBuilder::Finalize()
 	for (int j = 0; j < leafCount; j++) {
 		level.push_back(j);
 	}
+
+	// Chain the leaves left-to-right for in-order iteration.
+	chainLevel(level);
 
 	fLevels = 1;
 	while (level.size() > 1) {
@@ -170,6 +177,8 @@ void BPlusTreeBuilder::Finalize()
 			parents.push_back(static_cast<int>(fNodes.size()));
 			fNodes.push_back(std::move(node));
 		}
+		// Chain this newly built internal level's siblings left-to-right.
+		chainLevel(parents);
 		level = std::move(parents);
 		fLevels++;
 	}
