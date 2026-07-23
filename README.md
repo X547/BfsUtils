@@ -17,7 +17,7 @@
   every problem it finds without stopping and without modifying the image.
 
 Both work with the on-disk layout described in
-[`docs/BFS_On-Disk_Format.md`](local/BFS_On-Disk_Format.md). No Haiku driver
+[`docs/BFS_On-Disk_Format.md`](docs/BFS_On-Disk_Format.md). No Haiku driver
 source is consulted. On non-Haiku POSIX platforms, attributes are ignored in
 both directions; on Haiku they are preserved.
 
