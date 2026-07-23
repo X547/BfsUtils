@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -157,21 +158,93 @@ std::vector<uint8_t> Resizer::BuildSuperBlock(int64_t numBlocks, int64_t numAgs,
 
 void Resizer::Grow(int64_t newNum)
 {
-	int64_t oldNum = fGeo.numBlocks;
-	int64_t newBitmapBlocks = BitmapBlocksFor(newNum);
-	if (newBitmapBlocks != fGeo.bitmapBlocks) {
-		throw std::runtime_error("growing across a bitmap-block boundary is not yet "
-			"supported (it would require relocating the log)");
-	}
+	int64_t bitsPerBlock = static_cast<int64_t>(fGeo.blockSize) * 8;
 	int64_t groupSize = static_cast<int64_t>(1) << fGeo.agShift;
-	int64_t newNumAgs = (newNum + groupSize - 1) >> fGeo.agShift;
+	int64_t finalBitmap = BitmapBlocksFor(newNum);
+
+	// ag_shift is held fixed, so the reserved prefix (boot + bitmap + log) must
+	// still fit inside the first allocation group after growing. Enlarging
+	// ag_shift would re-encode every block_run in the volume and is out of scope.
+	if (Reserved(finalBitmap) > groupSize) {
+		int64_t maxBitmap = groupSize - 1 - fGeo.logBlocks.length;
+		int64_t maxBlocks = maxBitmap > 0 ? maxBitmap * bitsPerBlock : 0;
+		char message[192];
+		snprintf(message, sizeof(message),
+			"target too large for this volume's ag_shift: at most ~%lld blocks "
+			"(%lld bytes) without re-encoding every block_run",
+			static_cast<long long>(maxBlocks),
+			static_cast<long long>(maxBlocks) * fGeo.blockSize);
+		throw std::runtime_error(message);
+	}
 
 	if (fOptions.dryRun) {
-		printf("grow: %lld -> %lld blocks, num_ags %d -> %lld, no blocks moved\n",
-			static_cast<long long>(oldNum), static_cast<long long>(newNum),
-			fGeo.numAgs, static_cast<long long>(newNumAgs));
+		int64_t newNumAgs = (newNum + groupSize - 1) >> fGeo.agShift;
+		int64_t boundaries = finalBitmap - fGeo.bitmapBlocks;
+		printf("grow: %lld -> %lld blocks, num_ags %d -> %lld, bitmap %lld -> %lld "
+			"blocks (%lld boundary crossing(s), up to ~%lld blocks relocated)\n",
+			static_cast<long long>(fGeo.numBlocks), static_cast<long long>(newNum),
+			fGeo.numAgs, static_cast<long long>(newNumAgs),
+			static_cast<long long>(fGeo.bitmapBlocks),
+			static_cast<long long>(finalBitmap), static_cast<long long>(boundaries),
+			static_cast<long long>(boundaries));
 		return;
 	}
+
+	// Fast path: the target stays within the current bitmap's capacity, so the
+	// reserved region does not move -- pure metadata plus a file extension.
+	if (finalBitmap == fGeo.bitmapBlocks) {
+		GrowInPlace(newNum);
+		return;
+	}
+
+	// General path: cross one bitmap boundary at a time. Each iteration first
+	// advances the committed size (so relocations target committed free space and
+	// any interruption leaves a mountable volume at the last committed size), then
+	// vacates the single block the enlarged reserved prefix claims, then appends
+	// the bitmap block and shifts the empty log forward.
+	while (fGeo.bitmapBlocks < finalBitmap) {
+		int64_t curB = fGeo.bitmapBlocks;
+		int64_t capacity = curB * bitsPerBlock;   // current bitmap covers [0, capacity)
+
+		// (a) Fill the current bitmap to capacity (metadata only).
+		if (fGeo.numBlocks < capacity) {
+			GrowInPlace(capacity);
+		}
+
+		// (b) Evacuate the block the enlarged reserved prefix will take over: the
+		// first block past the log. Relocate whatever run/inode overlaps it into
+		// free space no later boundary can reclaim ([Reserved(finalBitmap), capacity)).
+		int64_t src = Reserved(curB);
+		fWinLo = src;
+		fWinHi = src + 1;
+		fAllocLow = Reserved(finalBitmap);
+		fAllocHigh = fGeo.numBlocks;   // == capacity
+		RelocateInWindow();
+		if (Allocated(src)) {
+			throw std::runtime_error("reserved-expansion block still allocated after "
+				"relocation (unreferenced allocated block?); run bfscheck");
+		}
+
+		// (c) Append the bitmap block, shift the log, and extend into the newly
+		// addressable region.
+		int64_t nextCapacity = (curB + 1) * bitsPerBlock;
+		int64_t stepTarget = std::min(newNum, nextCapacity);
+		AddBitmapBlock(stepTarget);
+	}
+
+	if (fRelocated > 0) {
+		fprintf(stderr, "\n");
+	}
+}
+
+
+void Resizer::GrowInPlace(int64_t newNum)
+{
+	// Precondition: newNum lies within the current bitmap's capacity, so no new
+	// bitmap block is needed and the reserved region stays put.
+	int64_t oldNum = fGeo.numBlocks;
+	int64_t groupSize = static_cast<int64_t>(1) << fGeo.agShift;
+	int64_t newNumAgs = (newNum + groupSize - 1) >> fGeo.agShift;
 
 	fImage.Truncate(static_cast<uint64_t>(newNum) * fGeo.blockSize);
 	fImage.Flush();
@@ -182,10 +255,71 @@ void Resizer::Grow(int64_t newNum)
 
 	fJournal.Begin();
 	StageDirtyBitmap();
-	std::vector<uint8_t> superBlock = BuildSuperBlock(newNum, newNumAgs, fUsedBlocks,
-		nullptr);
+	std::vector<uint8_t> superBlock = BuildSuperBlock(newNum, newNumAgs,
+		CountUsed(newNum), nullptr);
 	fJournal.Stage(0, superBlock.data());
 	fJournal.Commit(fImage);
+
+	fReader.ReloadSuperBlock();
+	fGeo = fReader.GetGeometry();
+}
+
+
+void Resizer::AddBitmapBlock(int64_t stepTarget)
+{
+	int64_t bitsPerBlock = static_cast<int64_t>(fGeo.blockSize) * 8;
+	int64_t groupSize = static_cast<int64_t>(1) << fGeo.agShift;
+	int64_t curB = fGeo.bitmapBlocks;
+	int64_t nextCapacity = (curB + 1) * bitsPerBlock;
+	int64_t logLen = fGeo.logBlocks.length;
+
+	// This only supports the standard layout where the log sits immediately after
+	// the bitmap; the new bitmap block takes over the log's old head block.
+	int64_t oldLogStart = fGeo.ToBlock(fGeo.logBlocks);
+	if (oldLogStart != 1 + curB) {
+		throw std::runtime_error("cannot grow across a bitmap boundary: the log is "
+			"not in the standard position right after the bitmap");
+	}
+	int64_t newLogStart = 1 + (curB + 1);            // == 2 + curB
+	int64_t src = Reserved(curB);                    // == 1 + curB + logLen (now free)
+
+	// Extend the backing file to cover the newly committed range. All reserved
+	// blocks (the new bitmap block and the shifted log) already lie on disk.
+	fImage.Truncate(static_cast<uint64_t>(stepTarget) * fGeo.blockSize);
+	fImage.Flush();
+
+	// Append the new (all-free) bitmap block; it describes blocks [capacity,
+	// nextCapacity). Growing bitmapBlocks first lets SetAllocated address it.
+	// Its on-disk home (the old log's head block) holds stale bytes, so it must be
+	// staged even if no bit in its range changes -- mark it dirty explicitly.
+	fBitmap.resize(static_cast<size_t>(curB + 1) * fGeo.blockSize, 0);
+	fGeo.bitmapBlocks = curB + 1;
+	fDirtyBitmap.insert(curB);
+
+	// Padding beyond the committed size is marked used; the reserved-expansion
+	// block becomes the shifted log's tail block. The old log head (block 1+curB)
+	// stays used -- it is now the new bitmap block.
+	for (int64_t block = stepTarget; block < nextCapacity; block++) {
+		SetAllocated(block, true);
+	}
+	SetAllocated(src, true);
+
+	int64_t newNumAgs = (stepTarget + groupSize - 1) >> fGeo.agShift;
+	BlockRun newLog = fGeo.ToRun(newLogStart, static_cast<uint16_t>(logLen));
+
+	fJournal.Begin();
+	StageDirtyBitmap();
+	std::vector<uint8_t> superBlock = BuildSuperBlock(stepTarget, newNumAgs,
+		CountUsed(stepTarget), nullptr);
+	uint8_t *p = superBlock.data() + kSuperBlockOffset;
+	PutBlockRun(p + super::kLogBlocks, newLog);
+	PutS64(p + super::kLogStart, newLogStart);
+	PutS64(p + super::kLogEnd, newLogStart);
+	fJournal.Stage(0, superBlock.data());
+	fJournal.Commit(fImage);
+
+	fReader.ReloadSuperBlock();
+	fGeo = fReader.GetGeometry();
 }
 
 
@@ -308,7 +442,7 @@ void Resizer::CollectInodes(int64_t block, std::set<int64_t> &visited,
 }
 
 
-int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dryRun)
+int64_t Resizer::RelocateStreamTail(const Inode &inode, bool dryRun)
 {
 	// A short symlink stores its target inline in the data_stream union, so its
 	// "runs" are text, not block_runs; it has no stream to relocate (matching
@@ -319,8 +453,13 @@ int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dry
 
 	int64_t moved = 0;
 	int64_t bs = fGeo.blockSize;
+	// A run needs relocating when it overlaps the active source window.
 	auto inTail = [&](const BlockRun &run) {
-		return !run.IsZero() && fGeo.ToBlock(run) + run.length > newNum;
+		if (run.IsZero()) {
+			return false;
+		}
+		int64_t start = fGeo.ToBlock(run);
+		return start < fWinHi && start + run.length > fWinLo;
 	};
 
 	// Direct runs, patched in the inode's own data_stream.
@@ -332,8 +471,7 @@ int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dry
 		if (inTail(run)) {
 			moved += run.length;
 			if (!dryRun) {
-				RelocateRun(inode.block, inode::kData + stream::kDirect + i * 8, run,
-					newNum);
+				RelocateRun(inode.block, inode::kData + stream::kDirect + i * 8, run);
 			}
 		}
 	}
@@ -355,15 +493,14 @@ int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dry
 				moved += run.length;
 				if (!dryRun) {
 					RelocateRun(arrStart + (j * 8) / bs, static_cast<int>((j * 8) % bs),
-						run, newNum);
+						run);
 				}
 			}
 		}
 		if (inTail(indirect)) {
 			moved += indirect.length;
 			if (!dryRun) {
-				RelocateRun(inode.block, inode::kData + stream::kIndirect, indirect,
-					newNum);
+				RelocateRun(inode.block, inode::kData + stream::kIndirect, indirect);
 			}
 		}
 	}
@@ -392,7 +529,7 @@ int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dry
 					moved += run.length;
 					if (!dryRun) {
 						RelocateRun(arrStart + (j * 8) / bs,
-							static_cast<int>((j * 8) % bs), run, newNum);
+							static_cast<int>((j * 8) % bs), run);
 					}
 				}
 			}
@@ -400,15 +537,14 @@ int64_t Resizer::RelocateStreamTail(const Inode &inode, int64_t newNum, bool dry
 				moved += arr.length;
 				if (!dryRun) {
 					RelocateRun(topStart + (t * 8) / bs, static_cast<int>((t * 8) % bs),
-						arr, newNum);
+						arr);
 				}
 			}
 		}
 		if (inTail(dbl)) {
 			moved += dbl.length;
 			if (!dryRun) {
-				RelocateRun(inode.block, inode::kData + stream::kDoubleIndirect, dbl,
-					newNum);
+				RelocateRun(inode.block, inode::kData + stream::kDoubleIndirect, dbl);
 			}
 		}
 	}
@@ -633,13 +769,13 @@ void Resizer::CopyRun(int64_t oldStart, int64_t newStart, uint16_t length)
 
 
 void Resizer::RelocateRun(int64_t ownerBlock, int slotOffset,
-	const BlockRun &oldRun, int64_t newNum)
+	const BlockRun &oldRun)
 {
 	int64_t length = oldRun.length;
-	int64_t newStart = AllocateRun(length, Reserved(fGeo.bitmapBlocks), newNum);
+	int64_t newStart = AllocateRun(length, fAllocLow, fAllocHigh);
 	if (newStart < 0) {
-		throw std::runtime_error("not enough contiguous free space below the new "
-			"size to relocate a run; shrink less");
+		throw std::runtime_error("not enough contiguous free space to relocate a "
+			"run; shrink/grow less");
 	}
 	int64_t oldStart = fGeo.ToBlock(oldRun);
 
@@ -738,12 +874,12 @@ void Resizer::BuildReferenceMap(const std::vector<Inode> &inodes)
 }
 
 
-void Resizer::RelocateInode(int64_t oldBlock, int64_t newNum)
+void Resizer::RelocateInode(int64_t oldBlock)
 {
-	int64_t newBlock = AllocateBlock(Reserved(fGeo.bitmapBlocks), newNum);
+	int64_t newBlock = AllocateBlock(fAllocLow, fAllocHigh);
 	if (newBlock < 0) {
-		throw std::runtime_error("not enough free space below the new size to "
-			"relocate an inode; shrink less");
+		throw std::runtime_error("not enough free space to relocate an inode; "
+			"shrink/grow less");
 	}
 
 	// Buffer every block this move rewrites so repeated edits to the same block
@@ -815,16 +951,48 @@ void Resizer::RelocateInode(int64_t oldBlock, int64_t newNum)
 }
 
 
+void Resizer::RelocateInWindow()
+{
+	// fMoved tracks inode moves within a single Phase B (for references among
+	// inodes moved together); it must not carry over between windows.
+	fMoved.clear();
+
+	// Phase A: relocate stream data overlapping the window so every affected
+	// stream lies outside it and its descriptors are final before any inode
+	// header moves.
+	std::vector<Inode> inodes = CollectAllInodes();
+	for (const Inode &inode : inodes) {
+		RelocateStreamTail(inode, /*dryRun=*/false);
+	}
+
+	// Phase B: relocate inode headers inside the window, fixing all references.
+	// Re-read inodes so tree streams reflect Phase A's descriptor edits (fReader
+	// reads straight from fImage, which now holds those committed changes).
+	inodes = CollectAllInodes();
+	BuildReferenceMap(inodes);
+	for (const Inode &inode : inodes) {
+		if (inode.block < fWinLo || inode.block >= fWinHi) {
+			continue;
+		}
+		RelocateInode(inode.block);
+	}
+}
+
+
 int64_t Resizer::Relocate(int64_t newNum)
 {
 	fprintf(stderr, "scanning inodes...\n");
-	std::vector<Inode> inodes = CollectAllInodes();
+
+	// Shrink evacuates everything from the doomed tail [newNum, numBlocks).
+	fWinLo = newNum;
+	fWinHi = fGeo.numBlocks;
 
 	if (fOptions.dryRun) {
+		std::vector<Inode> inodes = CollectAllInodes();
 		int64_t dataBlocks = 0;
 		int64_t inodeMoves = 0;
 		for (const Inode &inode : inodes) {
-			dataBlocks += RelocateStreamTail(inode, newNum, /*dryRun=*/true);
+			dataBlocks += RelocateStreamTail(inode, /*dryRun=*/true);
 			if (inode.block >= newNum) {
 				inodeMoves++;
 			}
@@ -836,23 +1004,9 @@ int64_t Resizer::Relocate(int64_t newNum)
 		return dataBlocks + inodeMoves;
 	}
 
-	// Phase A: relocate tail-crossing data so every stream lies below newNum and
-	// its descriptors are final before any inode header moves.
-	for (const Inode &inode : inodes) {
-		RelocateStreamTail(inode, newNum, /*dryRun=*/false);
-	}
-
-	// Phase B: relocate inode headers still in the tail, fixing all references.
-	// Re-read inodes so tree streams reflect Phase A's descriptor edits (fReader
-	// reads straight from fImage, which now holds those committed changes).
-	inodes = CollectAllInodes();
-	BuildReferenceMap(inodes);
-	for (const Inode &inode : inodes) {
-		if (inode.block < newNum) {
-			continue;
-		}
-		RelocateInode(inode.block, newNum);
-	}
+	fAllocLow = Reserved(fGeo.bitmapBlocks);
+	fAllocHigh = newNum;
+	RelocateInWindow();
 
 	if (fRelocated > 0) {
 		fprintf(stderr, "\n");

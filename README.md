@@ -145,14 +145,26 @@ refused.
 
 Supported today:
 
-- **Grow** within a bitmap-block band (no new bitmap blocks needed).
-- **Shrink** when the freed tail is unused — including across a bitmap-block
-  boundary, where the empty log is relocated to keep the reserved region a
-  contiguous prefix (as Haiku's allocator requires).
+- **Grow** to any size, including across bitmap-block boundaries. Each new bitmap
+  block is added one boundary at a time: the committed size is advanced first,
+  then the single block the enlarged reserved prefix claims is relocated out of
+  the way, then the bitmap block is appended and the empty log shifted forward —
+  so an interruption always leaves a mountable volume at the last committed size.
+- **Shrink** to any size: when the freed tail is unused it is simply truncated;
+  when it holds live data, that data (stream runs and inodes) is relocated below
+  the new size with all references fixed up. Across a bitmap-block boundary the
+  empty log is relocated to keep the reserved region a contiguous prefix (as
+  Haiku's allocator requires).
 
-Not yet implemented (refused with a clear message, image untouched): shrinking
-past used blocks (relocating live data — the "moved blocks" path) and growing
-across a bitmap-block boundary.
+Limitations (refused with a clear message, image untouched):
+
+- **`ag_shift` is held fixed**, so the reserved region (boot block + bitmap +
+  log) must still fit inside the first allocation group. This caps a grow at
+  roughly `group_size * block_size * 8` blocks; growing beyond it would require
+  enlarging `ag_shift`, which re-encodes every `block_run` in the volume.
+- Relocation needs contiguous free space in a single allocation group for each
+  moved run; a badly fragmented volume can refuse a resize that the raw free-block
+  count would otherwise allow (there is no compaction). Use `--dry-run` first.
 
 ```sh
 bfsresize data.bfs 64M          # grow to 64 MiB

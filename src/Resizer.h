@@ -53,8 +53,19 @@ private:
 		int64_t usedBlocks, const BlockRun *indices);
 
 	void Grow(int64_t newNum);
+	// Metadata-only grow within the current bitmap's capacity (no new bitmap
+	// block): extend the file, free the new tail, bump the superblock. Updates
+	// fGeo and the reader's cached bounds.
+	void GrowInPlace(int64_t newNum);
+	// Cross one bitmap boundary: append a bitmap block (taking over the old log's
+	// head), shift the empty log forward by one, and advance the committed size to
+	// 'stepTarget'. Precondition: the reserved-expansion block has been vacated.
+	void AddBitmapBlock(int64_t stepTarget);
 	void ShrinkFreeTail(int64_t newNum);
 	int64_t Relocate(int64_t newNum);
+	// Relocate every run/inode overlapping [fWinLo, fWinHi) into free space in
+	// [fAllocLow, fAllocHigh), fixing all references (Phase A then Phase B).
+	void RelocateInWindow();
 
 	void CollectInodes(int64_t block, std::set<int64_t> &visited,
 		std::vector<Inode> &out);
@@ -67,13 +78,12 @@ private:
 	// Phase A: relocate the tail-crossing data of one inode's stream (direct,
 	// indirect array + its payload runs, double-indirect at all three levels).
 	// Returns the number of blocks moved; with 'dryRun' it only counts.
-	int64_t RelocateStreamTail(const Inode &inode, int64_t newNum, bool dryRun);
-	// Copy 'oldRun' to fresh space below 'newNum', repoint the block_run stored at
-	// (ownerBlock, slotOffset) to the copy, free the old run, all in one atomic
-	// journal transaction. 'ownerBlock' may itself be an inode, an indirect array
-	// block, or a double-indirect top block.
-	void RelocateRun(int64_t ownerBlock, int slotOffset, const BlockRun &oldRun,
-		int64_t newNum);
+	int64_t RelocateStreamTail(const Inode &inode, bool dryRun);
+	// Copy 'oldRun' to fresh space in [fAllocLow, fAllocHigh), repoint the
+	// block_run stored at (ownerBlock, slotOffset) to the copy, free the old run,
+	// all in one atomic journal transaction. 'ownerBlock' may itself be an inode,
+	// an indirect array block, or a double-indirect top block.
+	void RelocateRun(int64_t ownerBlock, int slotOffset, const BlockRun &oldRun);
 
 	// Phase B: relocate inodes out of the tail with full reference fixup.
 	struct RunFieldRef {          // a block_run field to repoint to the moved inode
@@ -94,7 +104,7 @@ private:
 		const std::function<void(int64_t logicalOffset, int64_t value)> &cb);
 	int64_t StreamPhysicalBlock(const DataStreamInfo &stream, int64_t logicalBlock);
 	int64_t CurrentBlock(int64_t originalBlock) const;
-	void RelocateInode(int64_t oldBlock, int64_t newNum);
+	void RelocateInode(int64_t oldBlock);
 
 	std::string fImagePath;
 	ResizeOptions fOptions;
@@ -107,6 +117,15 @@ private:
 	std::vector<uint8_t> fBitmap;       // full on-disk allocation bitmap
 	std::set<int64_t> fDirtyBitmap;     // bitmap block indices changed in memory
 	int64_t fRelocated = 0;
+
+	// Active relocation parameters, set before RelocateInWindow(): relocate any
+	// run/inode overlapping the source window [fWinLo, fWinHi) into free target
+	// space in [fAllocLow, fAllocHigh). Shrink evacuates the tail; grow evacuates
+	// the single block the enlarged reserved prefix will claim.
+	int64_t fWinLo = 0;
+	int64_t fWinHi = 0;
+	int64_t fAllocLow = 0;
+	int64_t fAllocHigh = 0;
 
 	// Reference fixup state (Phase B), built after Phase A has finalized streams.
 	std::map<int64_t, InodeRefs> fRefs;         // original inode block -> its references

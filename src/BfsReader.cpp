@@ -77,6 +77,30 @@ BfsReader::BfsReader(ImageFile &image):
 }
 
 
+void BfsReader::ReloadSuperBlock()
+{
+	uint8_t sb[512];
+	fImage.ReadAt(kSuperBlockOffset, sb, sizeof(sb));
+	if (GetU32(sb + super::kMagic1) != kSuperBlockMagic1) {
+		fImage.ReadAt(0, sb, sizeof(sb));
+	}
+	RequireMagic(sb);
+
+	fGeometry.numBlocks = GetS64(sb + super::kNumBlocks);
+	fGeometry.numAgs = GetS32(sb + super::kNumAgs);
+	fGeometry.logBlocks = GetBlockRun(sb + super::kLogBlocks);
+
+	int64_t bitsPerBlock = static_cast<int64_t>(fGeometry.blockSize) * 8;
+	fGeometry.bitmapBlocks = (fGeometry.numBlocks + bitsPerBlock - 1) / bitsPerBlock;
+
+	fUsedBlocks = GetS64(sb + super::kUsedBlocks);
+	fLogStart = GetS64(sb + super::kLogStart);
+	fLogEnd = GetS64(sb + super::kLogEnd);
+	fRootDir = GetBlockRun(sb + super::kRootDir);
+	fIndices = GetBlockRun(sb + super::kIndices);
+}
+
+
 void BfsReader::ReadBlock(int64_t block, uint8_t *out)
 {
 	if (block < 0 || block >= fGeometry.numBlocks) {

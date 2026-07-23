@@ -69,6 +69,14 @@ public:
 	explicit BfsReader(ImageFile &image);
 
 	const Geometry &GetGeometry() const {return fGeometry;}
+
+	// Re-read the superblock after an in-place resize commits, so subsequent
+	// on-demand reads observe the new size, log position, and relocated root /
+	// index directories (used by bfsresize, which re-scans inodes between
+	// boundary-crossing commits). The immutable geometry (block size, ag_shift) is
+	// left untouched.
+	void ReloadSuperBlock();
+
 	BlockRun RootDirectory() const {return fRootDir;}
 	BlockRun IndexDirectory() const {return fIndices;}
 	const std::string &VolumeName() const {return fName;}
