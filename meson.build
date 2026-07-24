@@ -53,3 +53,19 @@ bfsresize_sources = [
 
 executable('bfsresize', bfsresize_sources,
 	install : true)
+
+
+libpng_dep = dependency('libpng')
+
+bfsmap_sources = [
+	'src/ImageFile.cpp',
+	'src/BfsReader.cpp',
+	'src/BlockMap.cpp',
+	'src/Png.cpp',
+	'src/MapRenderer.cpp',
+	'src/map_main.cpp',
+]
+
+executable('bfsmap', bfsmap_sources,
+	dependencies : [libpng_dep],
+	install : true)

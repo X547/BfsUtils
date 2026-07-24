@@ -15,6 +15,9 @@
   sidecar redo-journal.
 - **`bfscheck`** verifies the integrity of a BFS image (read-only), reporting
   every problem it finds without stopping and without modifying the image.
+- **`bfsmap`** renders a BFS image's block usage as a color-coded PNG
+  (read-only), so you can see at a glance how the volume is laid out and how
+  fragmented it is.
 
 Both work with the on-disk layout described in
 [`docs/BFS_On-Disk_Format.md`](docs/BFS_On-Disk_Format.md). No Haiku driver
@@ -32,6 +35,10 @@ ninja -C build
 
 The result is `build/makebfs`. It builds on any POSIX-compatible system and on
 Haiku. Attribute archiving is compiled in only under `__HAIKU__`.
+
+`bfsmap` links against **libpng** (found via `pkg-config`); the other tools have
+no external dependencies. Install libpng development headers first — for example
+`libpng-dev` on Debian/Ubuntu, `libpng_devel` on Haiku.
 
 On the remote Haiku machine (see `local/ENVIRONMENT.md`):
 
@@ -169,6 +176,34 @@ Limitations (refused with a clear message, image untouched):
 ```sh
 bfsresize data.bfs 64M          # grow to 64 MiB
 bfsresize --dry-run data.bfs 32M
+```
+
+### `bfsmap`
+
+```sh
+bfsmap [options] <image> [output.png]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--width N` | Blocks per row in the grid (default: auto, ~2:1 landscape). |
+| `--scale N` | Pixels per block cell (default: auto). |
+| `--replay-log` | Map the post-replay state of an unclean volume. |
+
+`bfsmap` walks the volume read-only and paints every block as one cell of a grid
+(row-major by block number), colored by what it holds: free, reserved (boot +
+superblock), bitmap, journal, inode, metadata (directory / attribute B+trees),
+index, indirect (block_run arrays), file data, fragmented file data, attribute
+data, or leaked (allocated but unreachable from the root). A legend below the
+grid lists every type present with its block count and share of the volume. A
+regular file is counted as *fragmented* only when its data lands in physically
+separated pieces — runs that abut on disk count as one contiguous fragment.
+
+If no output path is given, `<image>.png` is used. Rendering uses **libpng**.
+
+```sh
+bfsmap payload.bfs                    # writes payload.bfs.png
+bfsmap --width 512 --scale 2 data.bfs data.png
 ```
 
 ## What gets written
