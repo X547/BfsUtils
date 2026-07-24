@@ -46,7 +46,6 @@ constexpr uint32_t kInodeTimeMask = 0xfff0;
 
 // inode_flags (only the low 16 bits are persistent).
 constexpr uint32_t kInodeInUse = 0x00000001;
-constexpr uint32_t kInodeAttrInode = 0x00000004;
 constexpr uint32_t kInodeLogged = 0x00000008;
 constexpr uint32_t kInodeDeleted = 0x00000010;
 constexpr uint32_t kInodeNotReady = 0x00000020;

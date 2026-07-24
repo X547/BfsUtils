@@ -485,7 +485,6 @@ its entry names.)
 ```c
 enum inode_flags {
     INODE_IN_USE          = 0x00000001,  // always set for a live inode
-    INODE_ATTR_INODE      = 0x00000004,  // this inode is an attribute
     INODE_LOGGED          = 0x00000008,  // data stream changes are journaled
     INODE_DELETED         = 0x00000010,  // inode is deleted
     INODE_NOT_READY       = 0x00000020,  // inode under construction; fields invalid
@@ -998,7 +997,7 @@ lazily — `attributes` is a zero run until the first large attribute is added.
 - The attribute directory is itself an inode with `S_ATTR_DIR` set in its `mode`;
   its data stream holds a directory B+tree keyed by attribute name, whose values
   are the attribute inode numbers.
-- Each **attribute inode** has `S_ATTR` set (and the `INODE_ATTR_INODE` flag),
+- Each **attribute inode** has `S_ATTR` set in its `mode`,
   stores the attribute's data-type code in its `type` field, and stores the
   attribute value in its data stream (`data_stream.size` bytes).
 - Small attributes are *not* promoted to inodes; they remain in the owner's

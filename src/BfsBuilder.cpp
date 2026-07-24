@@ -346,7 +346,7 @@ int BfsBuilder::PlanAttributeDir(Node &node, int ownerPlan,
 		int attrIndex = NewInode();
 		InodePlan &plan = fInodes[attrIndex];
 		plan.mode = kSAttr | 0644u;
-		plan.flags = kInodeInUse | kInodeAttrInode;
+		plan.flags = kInodeInUse;
 		plan.uid = node.uid;
 		plan.gid = node.gid;
 		plan.createTime = node.createTime;

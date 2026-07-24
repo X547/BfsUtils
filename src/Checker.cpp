@@ -812,10 +812,6 @@ void Checker::CheckAttributeDir(int64_t block, const std::string &path)
 		if (!(attrInode.mode & kSAttr)) {
 			fFindings.Warning("mode", "attribute inode missing S_ATTR", entry.inode, attrPath);
 		}
-		if (!(attrInode.flags & kInodeAttrInode)) {
-			fFindings.Warning("mode", "attribute inode missing INODE_ATTR_INODE flag",
-				entry.inode, attrPath);
-		}
 		CheckDataStream(attrInode, attrPath + "/" + entry.name);
 	}
 }
