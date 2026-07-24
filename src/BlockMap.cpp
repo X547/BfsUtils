@@ -26,7 +26,8 @@ const BlockTypeInfo kBlockTypeInfo[kBlockTypeCount] = {
 
 BlockMap::BlockMap(BfsReader &reader):
 	fReader(reader),
-	fGeo(reader.GetGeometry())
+	fGeo(reader.GetGeometry()),
+	fOrder(reader.Order())
 {
 }
 
@@ -60,11 +61,14 @@ void BlockMap::LoadBitmap()
 
 bool BlockMap::BitmapAllocated(int64_t block) const
 {
-	size_t index = static_cast<size_t>(block >> 3);
-	if (index >= fBitmap.size()) {
+	// The bitmap is a sequence of 32-bit words in the volume's byte order; block N
+	// is bit (N % 32) of word (N / 32) (see BFS_On-Disk_Format.md, block bitmap).
+	size_t wordOffset = static_cast<size_t>(block >> 5) * 4;
+	if (wordOffset + 4 > fBitmap.size()) {
 		return false;
 	}
-	return ((fBitmap[index] >> (block & 7)) & 1) != 0;
+	uint32_t word = GetU32(fBitmap.data() + wordOffset, fOrder);
+	return ((word >> (block & 31)) & 1) != 0;
 }
 
 
@@ -132,7 +136,7 @@ void BlockMap::CollectStream(const DataStreamInfo &s,
 			std::vector<uint8_t> array = ReadRunBytes(s.indirect);
 			int64_t entries = static_cast<int64_t>(array.size()) / 8;
 			for (int64_t j = 0; j < entries; j++) {
-				BlockRun run = GetBlockRun(array.data() + j * 8);
+				BlockRun run = GetBlockRun(array.data() + j * 8, fOrder);
 				if (run.IsZero()) {
 					break;
 				}
@@ -147,7 +151,7 @@ void BlockMap::CollectStream(const DataStreamInfo &s,
 			std::vector<uint8_t> top = ReadRunBytes(s.doubleIndirect);
 			int64_t topEntries = static_cast<int64_t>(top.size()) / 8;
 			for (int64_t t = 0; t < topEntries; t++) {
-				BlockRun array = GetBlockRun(top.data() + t * 8);
+				BlockRun array = GetBlockRun(top.data() + t * 8, fOrder);
 				if (array.IsZero()) {
 					break;
 				}
@@ -157,7 +161,7 @@ void BlockMap::CollectStream(const DataStreamInfo &s,
 				std::vector<uint8_t> level = ReadRunBytes(array);
 				int64_t entries = static_cast<int64_t>(level.size()) / 8;
 				for (int64_t j = 0; j < entries; j++) {
-					BlockRun run = GetBlockRun(level.data() + j * 8);
+					BlockRun run = GetBlockRun(level.data() + j * 8, fOrder);
 					if (run.IsZero()) {
 						break;
 					}

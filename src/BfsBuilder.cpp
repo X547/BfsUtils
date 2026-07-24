@@ -51,10 +51,10 @@ int CompareStringKey(const std::vector<uint8_t> &a, const std::vector<uint8_t> &
 }
 
 
-std::vector<uint8_t> Int64Key(int64_t value)
+std::vector<uint8_t> Int64Key(int64_t value, ByteOrder order)
 {
 	std::vector<uint8_t> key(8);
-	PutS64(key.data(), value);
+	PutS64(key.data(), value, order);
 	return key;
 }
 
@@ -97,12 +97,12 @@ void WriteBytesStream(ImageFile &image, const Geometry &geometry,
 // Write one contiguous array run (indirect array, double-indirect top array, or a
 // second-level array) filled with 'count' block_run entries and zero-padded.
 void WriteRunArray(ImageFile &image, const Geometry &geometry,
-	const BlockRun &arrayRun, const BlockRun *entries, size_t count)
+	const BlockRun &arrayRun, const BlockRun *entries, size_t count, ByteOrder order)
 {
 	uint32_t blockSize = geometry.blockSize;
 	std::vector<uint8_t> buffer(static_cast<size_t>(arrayRun.length) * blockSize, 0);
 	for (size_t i = 0; i < count; i++) {
-		PutBlockRun(buffer.data() + i * 8, entries[i]);
+		PutBlockRun(buffer.data() + i * 8, entries[i], order);
 	}
 	int64_t start = geometry.ToBlock(arrayRun);
 	for (uint16_t b = 0; b < arrayRun.length; b++) {
@@ -113,15 +113,15 @@ void WriteRunArray(ImageFile &image, const Geometry &geometry,
 
 // Serialize the indirect / double-indirect array blocks referenced by a layout.
 void WriteArrayBlocks(ImageFile &image, const Geometry &geometry,
-	const StreamLayout &layout)
+	const StreamLayout &layout, ByteOrder order)
 {
 	if (!layout.indirect.IsZero()) {
 		WriteRunArray(image, geometry, layout.indirect,
-			layout.indirectEntries.data(), layout.indirectEntries.size());
+			layout.indirectEntries.data(), layout.indirectEntries.size(), order);
 	}
 	if (!layout.doubleIndirect.IsZero()) {
 		WriteRunArray(image, geometry, layout.doubleIndirect,
-			layout.ddSecondArrays.data(), layout.ddSecondArrays.size());
+			layout.ddSecondArrays.data(), layout.ddSecondArrays.size(), order);
 		int64_t entriesPerSecond = layout.base * (static_cast<int64_t>(geometry.blockSize) / 8);
 		size_t total = layout.ddDataRuns.size();
 		for (size_t s = 0; s < layout.ddSecondArrays.size(); s++) {
@@ -129,7 +129,7 @@ void WriteArrayBlocks(ImageFile &image, const Geometry &geometry,
 			size_t remaining = offset < total ? total - offset : 0;
 			size_t count = std::min(remaining, static_cast<size_t>(entriesPerSecond));
 			WriteRunArray(image, geometry, layout.ddSecondArrays[s],
-				layout.ddDataRuns.data() + offset, count);
+				layout.ddDataRuns.data() + offset, count, order);
 		}
 	}
 }
@@ -225,7 +225,7 @@ int BfsBuilder::PlanNode(Node &node, int parentPlan, bool isRoot)
 		plan.parentPlan = isRoot ? -1 : parentPlan;
 	}
 
-	SmallDataResult smallData = BuildSmallData(node.name, node.attributes, capacity);
+	SmallDataResult smallData = BuildSmallData(node.name, node.attributes, capacity, fOptions.byteOrder);
 	fInodes[index].smallData = std::move(smallData.bytes);
 	if (!smallData.largeAttributes.empty()) {
 		int attrDir = PlanAttributeDir(node, index, smallData.largeAttributes);
@@ -264,7 +264,7 @@ int BfsBuilder::PlanNode(Node &node, int parentPlan, bool isRoot)
 					return CompareStringKey(a.key, b.key) < 0;
 				});
 
-			auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType);
+			auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType, fOptions.byteOrder);
 			std::vector<std::vector<int>> groups;
 			for (const DirEntry &entry : entries) {
 				tree->AddKey(entry.key.data(),
@@ -329,7 +329,7 @@ int BfsBuilder::PlanAttributeDir(Node &node, int ownerPlan,
 		plan.modifiedTime = node.modifiedTime;
 		plan.changeTime = node.changeTime;
 		plan.parentPlan = ownerPlan;
-		plan.smallData = BuildSmallData(node.name, {}, capacity).bytes;
+		plan.smallData = BuildSmallData(node.name, {}, capacity, fOptions.byteOrder).bytes;
 	}
 
 	std::vector<const Attribute *> sorted(largeAttributes.begin(), largeAttributes.end());
@@ -340,7 +340,7 @@ int BfsBuilder::PlanAttributeDir(Node &node, int ownerPlan,
 			return CompareStringKey(ka, kb) < 0;
 		});
 
-	auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType);
+	auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType, fOptions.byteOrder);
 	std::vector<std::vector<int>> groups;
 	for (const Attribute *attribute : sorted) {
 		int attrIndex = NewInode();
@@ -354,7 +354,7 @@ int BfsBuilder::PlanAttributeDir(Node &node, int ownerPlan,
 		plan.changeTime = node.changeTime;
 		plan.type = attribute->type;
 		plan.parentPlan = dirIndex;
-		plan.smallData = BuildSmallData(attribute->name, {}, capacity).bytes;
+		plan.smallData = BuildSmallData(attribute->name, {}, capacity, fOptions.byteOrder).bytes;
 		plan.streamKind = StreamKind::Bytes;
 		plan.bytes = attribute->data;
 		plan.streamSize = attribute->data.size();
@@ -385,17 +385,21 @@ int BfsBuilder::PlanIndex(const std::string &name, uint32_t dataType,
 		|| dataType == kBPlusTreeInt32Type
 		|| dataType == kBPlusTreeUInt32Type;
 
+	// Numeric index keys were encoded in the volume's byte order (see Int64Key),
+	// so decode them the same way to sort by value; the checker likewise compares
+	// int keys numerically.
+	ByteOrder order = fOptions.byteOrder;
 	std::sort(inputs.begin(), inputs.end(),
-		[numeric](const std::pair<std::vector<uint8_t>, Node *> &a,
+		[numeric, order](const std::pair<std::vector<uint8_t>, Node *> &a,
 			const std::pair<std::vector<uint8_t>, Node *> &b) {
 			if (numeric) {
-				return GetS64(a.first.data()) < GetS64(b.first.data());
+				return GetS64(a.first.data(), order) < GetS64(b.first.data(), order);
 			}
 			return CompareStringKey(a.first, b.first) < 0;
 		});
 
 	size_t capacity = fOptions.blockSize - inode::kSmallDataStart;
-	auto tree = std::make_shared<BPlusTreeBuilder>(dataType);
+	auto tree = std::make_shared<BPlusTreeBuilder>(dataType, fOptions.byteOrder);
 	std::vector<std::vector<int>> groups;
 
 	size_t i = 0;
@@ -425,7 +429,7 @@ int BfsBuilder::PlanIndex(const std::string &name, uint32_t dataType,
 	plan.modifiedTime = fInodes[fRootPlan].modifiedTime;
 	plan.changeTime = fInodes[fRootPlan].changeTime;
 	plan.parentPlan = parentPlan;
-	plan.smallData = BuildSmallData(name, {}, capacity).bytes;
+	plan.smallData = BuildSmallData(name, {}, capacity, fOptions.byteOrder).bytes;
 	plan.streamKind = StreamKind::Tree;
 	plan.tree = tree;
 	plan.treeGroups = std::move(groups);
@@ -457,7 +461,7 @@ void BfsBuilder::PlanIndices()
 		plan.modifiedTime = fInodes[fRootPlan].modifiedTime;
 		plan.changeTime = fInodes[fRootPlan].changeTime;
 		plan.parentPlan = fRootPlan;
-		plan.smallData = BuildSmallData("indices", {}, capacity).bytes;
+		plan.smallData = BuildSmallData("indices", {}, capacity, fOptions.byteOrder).bytes;
 	}
 
 	std::vector<std::pair<std::vector<uint8_t>, Node *>> nameInputs;
@@ -472,9 +476,10 @@ void BfsBuilder::PlanIndices()
 			nameInputs.push_back({std::vector<uint8_t>(
 				node->name.begin(), node->name.end()), node});
 		}
-		sizeInputs.push_back({Int64Key(plan.reportedSize), node});
+		sizeInputs.push_back({Int64Key(plan.reportedSize, fOptions.byteOrder), node});
 		mtimeInputs.push_back({Int64Key(
-			EncodeTime(node->modifiedTime.seconds, node->modifiedTime.nanoseconds)),
+			EncodeTime(node->modifiedTime.seconds, node->modifiedTime.nanoseconds),
+			fOptions.byteOrder),
 			node});
 
 		for (const Attribute &attribute : node->attributes) {
@@ -507,7 +512,7 @@ void BfsBuilder::PlanIndices()
 			return CompareStringKey(ka, kb) < 0;
 		});
 
-	auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType);
+	auto tree = std::make_shared<BPlusTreeBuilder>(kBPlusTreeStringType, fOptions.byteOrder);
 	std::vector<std::vector<int>> groups;
 	for (auto &entry : indexEntries) {
 		tree->AddKey(reinterpret_cast<const uint8_t *>(entry.first.data()),
@@ -664,23 +669,23 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 	std::vector<uint8_t> buffer(blockSize, 0);
 	uint8_t *p = buffer.data();
 
-	PutU32(p + inode::kMagic1, kInodeMagic1);
-	PutBlockRun(p + inode::kInodeNum, fGeometry.ToRun(plan.block, 1));
-	PutU32(p + inode::kUid, plan.uid);
-	PutU32(p + inode::kGid, plan.gid);
-	PutU32(p + inode::kMode, plan.mode);
-	PutU32(p + inode::kFlags, plan.flags);
-	PutS64(p + inode::kCreateTime,
+	WU32(p + inode::kMagic1, kInodeMagic1);
+	WRun(p + inode::kInodeNum, fGeometry.ToRun(plan.block, 1));
+	WU32(p + inode::kUid, plan.uid);
+	WU32(p + inode::kGid, plan.gid);
+	WU32(p + inode::kMode, plan.mode);
+	WU32(p + inode::kFlags, plan.flags);
+	WS64(p + inode::kCreateTime,
 		EncodeTime(plan.createTime.seconds, plan.createTime.nanoseconds));
-	PutS64(p + inode::kLastModifiedTime,
+	WS64(p + inode::kLastModifiedTime,
 		EncodeTime(plan.modifiedTime.seconds, plan.modifiedTime.nanoseconds));
-	PutBlockRun(p + inode::kParent, fGeometry.ToRun(ParentBlock(plan), 1));
+	WRun(p + inode::kParent, fGeometry.ToRun(ParentBlock(plan), 1));
 	if (plan.attrDirPlan >= 0) {
-		PutBlockRun(p + inode::kAttributes,
+		WRun(p + inode::kAttributes,
 			fGeometry.ToRun(fInodes[plan.attrDirPlan].block, 1));
 	}
-	PutU32(p + inode::kType, plan.type);
-	PutS32(p + inode::kInodeSize, static_cast<int32_t>(blockSize));
+	WU32(p + inode::kType, plan.type);
+	WS32(p + inode::kInodeSize, static_cast<int32_t>(blockSize));
 
 	if (plan.streamKind == StreamKind::ShortSymlink) {
 		size_t n = std::min(plan.shortSymlink.size(),
@@ -689,10 +694,10 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 			::memcpy(p + inode::kData, plan.shortSymlink.data(), n);
 		}
 	} else {
-		WriteDataStream(p + inode::kData, fGeometry, plan.layout);
+		WriteDataStream(p + inode::kData, fGeometry, plan.layout, fOptions.byteOrder);
 	}
 
-	PutS64(p + inode::kStatusChangeTime,
+	WS64(p + inode::kStatusChangeTime,
 		EncodeTime(plan.changeTime.seconds, plan.changeTime.nanoseconds));
 
 	if (!plan.smallData.empty()) {
@@ -706,7 +711,7 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 	image.WriteBlock(plan.block, buffer.data());
 
 	// Indirect / double-indirect array blocks (empty for direct-only streams).
-	WriteArrayBlocks(image, fGeometry, plan.layout);
+	WriteArrayBlocks(image, fGeometry, plan.layout, fOptions.byteOrder);
 
 	std::vector<BlockRun> dataRuns = plan.layout.DataRuns();
 	switch (plan.streamKind) {
@@ -743,24 +748,24 @@ void BfsBuilder::SerializeSuperBlock(ImageFile &image, int64_t usedBlocks,
 	}
 	::memcpy(p + super::kName, name.data(), name.size());
 
-	PutU32(p + super::kMagic1, kSuperBlockMagic1);
-	PutU32(p + super::kFsByteOrder, kSuperBlockFsLendian);
-	PutU32(p + super::kBlockSize, fGeometry.blockSize);
-	PutU32(p + super::kBlockShift, fGeometry.blockShift);
-	PutS64(p + super::kNumBlocks, fGeometry.numBlocks);
-	PutS64(p + super::kUsedBlocks, usedBlocks);
-	PutS32(p + super::kInodeSize, static_cast<int32_t>(fGeometry.blockSize));
-	PutU32(p + super::kMagic2, kSuperBlockMagic2);
-	PutS32(p + super::kBlocksPerAg, fGeometry.blocksPerAg);
-	PutS32(p + super::kAgShift, fGeometry.agShift);
-	PutS32(p + super::kNumAgs, fGeometry.numAgs);
-	PutU32(p + super::kFlags, kSuperBlockDiskClean);
-	PutBlockRun(p + super::kLogBlocks, fGeometry.logBlocks);
-	PutS64(p + super::kLogStart, fGeometry.ToBlock(fGeometry.logBlocks));
-	PutS64(p + super::kLogEnd, fGeometry.ToBlock(fGeometry.logBlocks));
-	PutU32(p + super::kMagic3, kSuperBlockMagic3);
-	PutBlockRun(p + super::kRootDir, fGeometry.ToRun(fInodes[fRootPlan].block, 1));
-	PutBlockRun(p + super::kIndices, indicesRun);
+	WU32(p + super::kMagic1, kSuperBlockMagic1);
+	WU32(p + super::kFsByteOrder, kSuperBlockFsLendian);
+	WU32(p + super::kBlockSize, fGeometry.blockSize);
+	WU32(p + super::kBlockShift, fGeometry.blockShift);
+	WS64(p + super::kNumBlocks, fGeometry.numBlocks);
+	WS64(p + super::kUsedBlocks, usedBlocks);
+	WS32(p + super::kInodeSize, static_cast<int32_t>(fGeometry.blockSize));
+	WU32(p + super::kMagic2, kSuperBlockMagic2);
+	WS32(p + super::kBlocksPerAg, fGeometry.blocksPerAg);
+	WS32(p + super::kAgShift, fGeometry.agShift);
+	WS32(p + super::kNumAgs, fGeometry.numAgs);
+	WU32(p + super::kFlags, kSuperBlockDiskClean);
+	WRun(p + super::kLogBlocks, fGeometry.logBlocks);
+	WS64(p + super::kLogStart, fGeometry.ToBlock(fGeometry.logBlocks));
+	WS64(p + super::kLogEnd, fGeometry.ToBlock(fGeometry.logBlocks));
+	WU32(p + super::kMagic3, kSuperBlockMagic3);
+	WRun(p + super::kRootDir, fGeometry.ToRun(fInodes[fRootPlan].block, 1));
+	WRun(p + super::kIndices, indicesRun);
 
 	image.WriteAt(kSuperBlockOffset, buffer.data(), buffer.size());
 }
@@ -796,7 +801,7 @@ void BfsBuilder::Build(Node &root, const std::string &outputPath)
 	}
 
 	SerializeSuperBlock(image, allocator.UsedBlocks(), indicesRun);
-	allocator.WriteBitmap(image);
+	allocator.WriteBitmap(image, fOptions.byteOrder);
 	for (InodePlan &plan : fInodes) {
 		SerializeInode(image, plan);
 	}

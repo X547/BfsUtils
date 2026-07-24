@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "BfsFormat.h"
+#include "Endian.h"
 
 
 namespace bfs {
@@ -24,7 +25,7 @@ namespace bfs {
 // builder does not perform.)
 class BPlusTreeBuilder {
 public:
-	explicit BPlusTreeBuilder(uint32_t dataType);
+	explicit BPlusTreeBuilder(uint32_t dataType, ByteOrder order = ByteOrder::Little);
 
 	// Add a key that will hold 'valueCount' (>= 1) values. Keys must be added in
 	// ascending order according to the tree's key type.
@@ -78,12 +79,18 @@ private:
 		return (nodeIndex + 1) * kBPlusTreeNodeSize;
 	}
 
+	// On-disk field writers bound to the tree's byte order.
+	void WU16(uint8_t *p, uint16_t v) const {PutU16(p, v, fOrder);}
+	void WU32(uint8_t *p, uint32_t v) const {PutU32(p, v, fOrder);}
+	void WS64(uint8_t *p, int64_t v) const {PutS64(p, v, fOrder);}
+
 	std::vector<Entry> fEntries;
 	std::vector<PlanNode> fNodes;   // leaves first, then internal levels, root last
 	std::vector<DupNode> fDupNodes; // appended after fNodes in the stream
 	std::vector<int> fEntryDupFirst; // per entry: first dup-node list index, or -1
 
 	uint32_t fDataType = 0;
+	ByteOrder fOrder = ByteOrder::Little;
 	uint32_t fLevels = 1;
 	int fRootNode = 0;
 	uint64_t fStreamSize = 0;

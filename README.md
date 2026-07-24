@@ -56,6 +56,7 @@ makebfs [options] <source-directory> <output-image>
   -s, --size BYTES     total image size; accepts K/M/G suffixes
                        (default: smallest image that fits the content)
   -n, --name NAME      volume name (default: source directory name)
+      --endian ORDER   on-disk byte order: little (default) or big
       --no-index       do not generate the standard BFS indices
       --no-attributes  do not archive BFS attributes (Haiku only)
   -h, --help
@@ -69,6 +70,9 @@ makebfs ./payload payload.bfs
 
 # Fixed 64 MiB volume named "Data"
 makebfs -s 64M -n Data ./payload data.bfs
+
+# Big-endian volume (as used by BeOS/PowerPC); little-endian is the default
+makebfs --endian big ./payload payload-be.bfs
 ```
 
 By default the image is the smallest volume the content fits into, so the
@@ -92,9 +96,11 @@ and writes each file, directory, and symlink to `output-directory`, then
 restores permissions, modification time, best-effort ownership, and — on Haiku —
 attributes (from both the inline `small_data` region and attribute directories).
 The reader resolves all three data-stream tiers (direct, indirect,
-double-indirect). A volume with a non-empty journal is rejected unless
-`--replay-log` is given, in which case the log is replayed into an in-memory
-overlay before extraction.
+double-indirect). Both little-endian and big-endian volumes are read (the byte
+order is detected from the superblock); this applies equally to `bfscheck` and
+`bfsmap`. A volume with a non-empty journal is rejected unless `--replay-log` is
+given, in which case the log is replayed into an in-memory overlay before
+extraction.
 
 ```sh
 # Round-trips with makebfs
@@ -172,6 +178,9 @@ Limitations (refused with a clear message, image untouched):
 - Relocation needs contiguous free space in a single allocation group for each
   moved run; a badly fragmented volume can refuse a resize that the raw free-block
   count would otherwise allow (there is no compaction). Use `--dry-run` first.
+- **Big-endian volumes are read-only** across the tools, so `bfsresize` refuses
+  them (it writes structures back little-endian). `makebfs --endian big` can
+  create them and `bfsextract`/`bfscheck`/`bfsmap` read them.
 
 ```sh
 bfsresize data.bfs 64M          # grow to 64 MiB
@@ -208,8 +217,8 @@ bfsmap --width 512 --scale 2 data.bfs data.png
 
 ## What gets written
 
-- **Superblock** at byte offset 512, little-endian, `flags = 'CLEN'`, empty log
-  (`log_start == log_end`).
+- **Superblock** at byte offset 512, in the selected byte order (see `--endian`),
+  `flags = 'CLEN'`, empty log (`log_start == log_end`).
 - **Block bitmap** starting at block 1; used blocks form the contiguous prefix
   `[0, used_blocks)`.
 - **Log area** reserved immediately after the bitmap (empty on a clean volume).
@@ -261,9 +270,11 @@ noted. They are the first things to check if a volume fails to mount.
    a container's B+tree key type from its index-type mode bit; an index
    directory lacking one is rejected ("inode tree corrupt" → "volume doesn't
    have indices"). Individual indices carry their own type bit.
-2. **Little-endian volumes.** All integers are written little-endian regardless
-   of host byte order; the `fs_byte_order` marker stores the literal bytes
-   `BIGE`.
+2. **Byte order.** Integers are serialized in the volume's byte order —
+   little-endian by default, big-endian with `--endian big` — independent of the
+   host's byte order. The `fs_byte_order` marker holds the integer `'BIGE'`,
+   which serializes to the bytes `BIGE` on a big-endian volume and `EGIB` on a
+   little-endian one.
 3. **Allocation-group geometry.** The smallest `ag_shift` valid for the block
    size is chosen, then grown to keep the group count small and to keep the
    reserved region within the first group — any geometry satisfying the
@@ -284,7 +295,7 @@ noted. They are the first things to check if a volume fails to mount.
 
 | File | Responsibility |
 |------|----------------|
-| `BfsFormat.h` / `Endian.h` | On-disk constants, field offsets, LE serialization |
+| `BfsFormat.h` / `Endian.h` | On-disk constants, field offsets, endian-aware serialization |
 | `Geometry.h` | block ⇄ `block_run` conversion, volume geometry |
 | `SourceScanner` | Walk the source tree into an in-memory model |
 | `Attributes` | Read BFS attributes (`__HAIKU__` only) |

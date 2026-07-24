@@ -41,7 +41,8 @@ public:
 	int64_t UsedBlocks() const {return fCursor;}
 
 	// Emit the block bitmap (blocks 1 .. bitmapBlocks) reflecting the used set.
-	void WriteBitmap(ImageFile &image) const;
+	// The bitmap is a sequence of 32-bit words in the volume's byte order.
+	void WriteBitmap(ImageFile &image, ByteOrder order = ByteOrder::Little) const;
 
 private:
 	Geometry fGeometry;

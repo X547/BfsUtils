@@ -34,6 +34,13 @@ Resizer::Resizer(const std::string &imagePath, const ResizeOptions &options):
 	fGeo(fReader.GetGeometry()),
 	fUsedBlocks(fReader.UsedBlocks())
 {
+	// The resizer writes structures back with the little-endian Put* helpers, so
+	// it can only safely modify little-endian volumes. Big-endian volumes are
+	// read-only across these tools; refuse rather than corrupt.
+	if (fReader.Order() != ByteOrder::Little) {
+		throw std::runtime_error(
+			"big-endian volumes are supported read-only; cannot resize");
+	}
 	fJournal.SetBlockSize(fGeo.blockSize);
 }
 

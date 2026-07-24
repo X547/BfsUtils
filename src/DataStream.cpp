@@ -267,20 +267,20 @@ StreamLayout BuildStreamLayout(BlockAllocator &allocator, const Geometry &geomet
 
 
 void WriteDataStream(uint8_t *streamFields, const Geometry &geometry,
-	const StreamLayout &layout)
+	const StreamLayout &layout, ByteOrder order)
 {
 	::memset(streamFields, 0, 144);
 
 	for (size_t i = 0; i < layout.direct.size(); i++) {
-		PutBlockRun(streamFields + stream::kDirect + i * 8, layout.direct[i]);
+		PutBlockRun(streamFields + stream::kDirect + i * 8, layout.direct[i], order);
 	}
-	PutBlockRun(streamFields + stream::kIndirect, layout.indirect);
-	PutBlockRun(streamFields + stream::kDoubleIndirect, layout.doubleIndirect);
-	PutS64(streamFields + stream::kMaxDirectRange, layout.maxDirectRange);
-	PutS64(streamFields + stream::kMaxIndirectRange, layout.maxIndirectRange);
+	PutBlockRun(streamFields + stream::kIndirect, layout.indirect, order);
+	PutBlockRun(streamFields + stream::kDoubleIndirect, layout.doubleIndirect, order);
+	PutS64(streamFields + stream::kMaxDirectRange, layout.maxDirectRange, order);
+	PutS64(streamFields + stream::kMaxIndirectRange, layout.maxIndirectRange, order);
 	PutS64(streamFields + stream::kMaxDoubleIndirectRange,
-		layout.maxDoubleIndirectRange);
-	PutS64(streamFields + stream::kSize, static_cast<int64_t>(layout.size));
+		layout.maxDoubleIndirectRange, order);
+	PutS64(streamFields + stream::kSize, static_cast<int64_t>(layout.size), order);
 	(void)geometry;
 }
 

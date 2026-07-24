@@ -22,15 +22,15 @@ size_t RecordSize(size_t nameSize, size_t dataSize)
 
 void AppendRecord(std::vector<uint8_t> &out, uint32_t type,
 	const uint8_t *name, size_t nameSize,
-	const uint8_t *data, size_t dataSize)
+	const uint8_t *data, size_t dataSize, ByteOrder order)
 {
 	size_t start = out.size();
 	out.resize(start + RecordSize(nameSize, dataSize), 0);
 	uint8_t *p = &out[start];
 
-	PutU32(p + 0, type);
-	PutU16(p + 4, static_cast<uint16_t>(nameSize));
-	PutU16(p + 6, static_cast<uint16_t>(dataSize));
+	PutU32(p + 0, type, order);
+	PutU16(p + 4, static_cast<uint16_t>(nameSize), order);
+	PutU16(p + 6, static_cast<uint16_t>(dataSize), order);
 	if (nameSize > 0) {
 		::memcpy(p + 8, name, nameSize);
 	}
@@ -46,7 +46,8 @@ void AppendRecord(std::vector<uint8_t> &out, uint32_t type,
 
 
 SmallDataResult BuildSmallData(const std::string &name,
-	const std::vector<Attribute> &attributes, size_t smallDataCapacity)
+	const std::vector<Attribute> &attributes, size_t smallDataCapacity,
+	ByteOrder order)
 {
 	SmallDataResult result;
 
@@ -55,7 +56,7 @@ SmallDataResult BuildSmallData(const std::string &name,
 	uint8_t nameTag = kFileNameName;
 	AppendRecord(result.bytes, kFileNameType,
 		&nameTag, kFileNameNameLength,
-		reinterpret_cast<const uint8_t *>(name.data()), name.size());
+		reinterpret_cast<const uint8_t *>(name.data()), name.size(), order);
 
 	for (const Attribute &attribute : attributes) {
 		bool fits = attribute.name.size() <= 0xffff
@@ -65,7 +66,7 @@ SmallDataResult BuildSmallData(const std::string &name,
 			AppendRecord(result.bytes, attribute.type,
 				reinterpret_cast<const uint8_t *>(attribute.name.data()),
 				attribute.name.size(),
-				attribute.data.data(), attribute.data.size());
+				attribute.data.data(), attribute.data.size(), order);
 		} else {
 			result.largeAttributes.push_back(&attribute);
 		}

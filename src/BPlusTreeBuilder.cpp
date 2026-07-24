@@ -30,8 +30,9 @@ int64_t MakeDuplicateLink(int64_t nodeOffset)
 } // unnamed namespace
 
 
-BPlusTreeBuilder::BPlusTreeBuilder(uint32_t dataType):
-	fDataType(dataType)
+BPlusTreeBuilder::BPlusTreeBuilder(uint32_t dataType, ByteOrder order):
+	fDataType(dataType),
+	fOrder(order)
 {
 }
 
@@ -218,13 +219,13 @@ void BPlusTreeBuilder::Serialize(std::vector<uint8_t> &out,
 	out.assign(fStreamSize, 0);
 
 	// Tree header.
-	PutU32(&out[btreehdr::kMagic], kBPlusTreeMagic);
-	PutU32(&out[btreehdr::kNodeSize], kBPlusTreeNodeSize);
-	PutU32(&out[btreehdr::kMaxNumberOfLevels], fLevels);
-	PutU32(&out[btreehdr::kDataType], fDataType);
-	PutS64(&out[btreehdr::kRootNodePointer], NodeOffset(fRootNode));
-	PutS64(&out[btreehdr::kFreeNodePointer], kBPlusTreeNull);
-	PutS64(&out[btreehdr::kMaximumSize], static_cast<int64_t>(fStreamSize));
+	WU32(&out[btreehdr::kMagic], kBPlusTreeMagic);
+	WU32(&out[btreehdr::kNodeSize], kBPlusTreeNodeSize);
+	WU32(&out[btreehdr::kMaxNumberOfLevels], fLevels);
+	WU32(&out[btreehdr::kDataType], fDataType);
+	WS64(&out[btreehdr::kRootNodePointer], NodeOffset(fRootNode));
+	WS64(&out[btreehdr::kFreeNodePointer], kBPlusTreeNull);
+	WS64(&out[btreehdr::kMaximumSize], static_cast<int64_t>(fStreamSize));
 
 	// Regular nodes.
 	for (size_t idx = 0; idx < fNodes.size(); idx++) {
@@ -233,11 +234,11 @@ void BPlusTreeBuilder::Serialize(std::vector<uint8_t> &out,
 		uint16_t keyCount = static_cast<uint16_t>(node.keyLengths.size());
 		uint16_t keyLength = static_cast<uint16_t>(node.keyBytes.size());
 
-		PutS64(base + btreenode::kLeftLink, node.leftLink);
-		PutS64(base + btreenode::kRightLink, node.rightLink);
-		PutS64(base + btreenode::kOverflowLink, node.overflowLink);
-		PutU16(base + btreenode::kAllKeyCount, keyCount);
-		PutU16(base + btreenode::kAllKeyLength, keyLength);
+		WS64(base + btreenode::kLeftLink, node.leftLink);
+		WS64(base + btreenode::kRightLink, node.rightLink);
+		WS64(base + btreenode::kOverflowLink, node.overflowLink);
+		WU16(base + btreenode::kAllKeyCount, keyCount);
+		WU16(base + btreenode::kAllKeyLength, keyLength);
 
 		if (keyLength > 0) {
 			::memcpy(base + btreenode::kSize, node.keyBytes.data(), keyLength);
@@ -250,7 +251,7 @@ void BPlusTreeBuilder::Serialize(std::vector<uint8_t> &out,
 		uint16_t cumulative = 0;
 		for (uint16_t k = 0; k < keyCount; k++) {
 			cumulative = static_cast<uint16_t>(cumulative + node.keyLengths[k]);
-			PutU16(lengthTable + k * sizeof(uint16_t), cumulative);
+			WU16(lengthTable + k * sizeof(uint16_t), cumulative);
 
 			int64_t value;
 			if (node.isLeaf) {
@@ -267,7 +268,7 @@ void BPlusTreeBuilder::Serialize(std::vector<uint8_t> &out,
 			} else {
 				value = node.childValue[k];
 			}
-			PutS64(values + k * sizeof(int64_t), value);
+			WS64(values + k * sizeof(int64_t), value);
 		}
 	}
 
@@ -278,14 +279,14 @@ void BPlusTreeBuilder::Serialize(std::vector<uint8_t> &out,
 		const DupNode &dup = fDupNodes[d];
 		uint8_t *base = &out[static_cast<size_t>(
 			NodeOffset(dupBase + static_cast<int64_t>(d)))];
-		PutS64(base + 0 * sizeof(int64_t), dup.leftLink);
-		PutS64(base + 1 * sizeof(int64_t), dup.rightLink);
-		PutS64(base + 2 * sizeof(int64_t), static_cast<int64_t>(dup.count));
+		WS64(base + 0 * sizeof(int64_t), dup.leftLink);
+		WS64(base + 1 * sizeof(int64_t), dup.rightLink);
+		WS64(base + 2 * sizeof(int64_t), static_cast<int64_t>(dup.count));
 
 		const Entry &entry = fEntries[dup.entry];
 		for (uint32_t v = 0; v < dup.count; v++) {
 			int64_t value = valuesFlat[entry.valueStart + dup.localStart + v];
-			PutS64(base + (3 + v) * sizeof(int64_t), value);
+			WS64(base + (3 + v) * sizeof(int64_t), value);
 		}
 	}
 }

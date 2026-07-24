@@ -200,21 +200,40 @@ struct BlockRun {
 };
 
 
-inline void PutBlockRun(uint8_t *p, const BlockRun &run)
+inline void PutBlockRun(uint8_t *p, const BlockRun &run,
+	ByteOrder order = ByteOrder::Little)
 {
-	PutS32(p + 0, run.group);
-	PutU16(p + 4, run.start);
-	PutU16(p + 6, run.length);
+	PutS32(p + 0, run.group, order);
+	PutU16(p + 4, run.start, order);
+	PutU16(p + 6, run.length, order);
 }
 
 
-inline BlockRun GetBlockRun(const uint8_t *p)
+inline BlockRun GetBlockRun(const uint8_t *p, ByteOrder order = ByteOrder::Little)
 {
 	BlockRun run;
-	run.group = GetS32(p + 0);
-	run.start = GetU16(p + 4);
-	run.length = GetU16(p + 6);
+	run.group = GetS32(p + 0, order);
+	run.start = GetU16(p + 4, order);
+	run.length = GetU16(p + 6, order);
 	return run;
+}
+
+
+// Determine a volume's byte order from the raw magic1 field. The four bytes of
+// magic1 spell "BFS1" on a big-endian volume and "1SFB" on a little-endian one,
+// so reading them in the matching order yields kSuperBlockMagic1. Returns true
+// and sets 'order' when the bytes are a valid magic1 in either order.
+inline bool DetectByteOrder(const uint8_t *magic1, ByteOrder &order)
+{
+	if (GetU32(magic1, ByteOrder::Little) == kSuperBlockMagic1) {
+		order = ByteOrder::Little;
+		return true;
+	}
+	if (GetU32(magic1, ByteOrder::Big) == kSuperBlockMagic1) {
+		order = ByteOrder::Big;
+		return true;
+	}
+	return false;
 }
 
 

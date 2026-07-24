@@ -27,6 +27,7 @@ void PrintUsage(const char *program)
 		"  -s, --size BYTES     total image size; accepts K/M/G suffixes\n"
 		"                       (default: smallest image that fits the content)\n"
 		"  -n, --name NAME      volume name (default: source directory name)\n"
+		"      --endian ORDER   on-disk byte order: little (default) or big\n"
 		"      --no-index       do not generate the standard BFS indices\n"
 		"      --no-attributes  do not archive BFS attributes (Haiku only)\n"
 		"  -h, --help           show this help\n",
@@ -134,6 +135,20 @@ int main(int argc, char **argv)
 			}
 			options.volumeName = argv[i];
 			haveName = true;
+		} else if (arg == "--endian") {
+			if (++i >= argc) {
+				fprintf(stderr, "%s: missing value for %s\n", argv[0], arg.c_str());
+				return 1;
+			}
+			std::string order = argv[i];
+			if (order == "little" || order == "le") {
+				options.byteOrder = bfs::ByteOrder::Little;
+			} else if (order == "big" || order == "be") {
+				options.byteOrder = bfs::ByteOrder::Big;
+			} else {
+				fprintf(stderr, "%s: --endian must be 'little' or 'big'\n", argv[0]);
+				return 1;
+			}
 		} else if (!arg.empty() && arg[0] == '-') {
 			fprintf(stderr, "%s: unknown option '%s'\n", argv[0], arg.c_str());
 			PrintUsage(argv[0]);

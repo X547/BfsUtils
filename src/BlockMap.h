@@ -96,6 +96,7 @@ private:
 
 	BfsReader &fReader;
 	Geometry fGeo;
+	ByteOrder fOrder;
 	int64_t fReserved = 0;
 	std::vector<uint8_t> fTypes;      // one BlockType per block
 	std::vector<uint8_t> fBitmap;

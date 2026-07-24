@@ -27,6 +27,7 @@ struct BuildOptions {
 	bool generateIndices = true;
 	bool readAttributes = false;   // effective on Haiku
 	uint64_t sizeOverride = 0;     // 0 == smallest possible image
+	ByteOrder byteOrder = ByteOrder::Little;   // on-disk byte order to write
 };
 
 
@@ -98,6 +99,13 @@ private:
 
 	int64_t ParentBlock(const InodePlan &plan) const;
 	int64_t FirstFreeBlock() const;
+
+	// On-disk field writers bound to the volume's byte order (fOptions.byteOrder).
+	void WU16(uint8_t *p, uint16_t v) const {PutU16(p, v, fOptions.byteOrder);}
+	void WU32(uint8_t *p, uint32_t v) const {PutU32(p, v, fOptions.byteOrder);}
+	void WS32(uint8_t *p, int32_t v) const {PutS32(p, v, fOptions.byteOrder);}
+	void WS64(uint8_t *p, int64_t v) const {PutS64(p, v, fOptions.byteOrder);}
+	void WRun(uint8_t *p, const BlockRun &r) const {PutBlockRun(p, r, fOptions.byteOrder);}
 
 	BuildOptions fOptions;
 	Geometry fGeometry;

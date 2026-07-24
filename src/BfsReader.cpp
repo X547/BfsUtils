@@ -15,17 +15,20 @@ namespace bfs {
 namespace {
 
 
-void RequireMagic(const uint8_t *sb)
+// Read the superblock into 'sb', following the offset-512-then-0 fallback, and
+// determine the volume's byte order from magic1 (see section 2 and "Byte order").
+ByteOrder ReadSuperBlock(ImageFile &image, uint8_t *sb)
 {
-	if (GetU32(sb + super::kMagic1) != kSuperBlockMagic1
-		|| GetU32(sb + super::kMagic2) != kSuperBlockMagic2
-		|| GetU32(sb + super::kMagic3) != kSuperBlockMagic3) {
-		throw std::runtime_error("not a BFS volume (bad superblock magic)");
+	ByteOrder order;
+	image.ReadAt(kSuperBlockOffset, sb, 512);
+	if (!DetectByteOrder(sb + super::kMagic1, order)) {
+		// Fall back to a superblock at offset 0 (see section 2).
+		image.ReadAt(0, sb, 512);
+		if (!DetectByteOrder(sb + super::kMagic1, order)) {
+			throw std::runtime_error("not a BFS volume (bad superblock magic)");
+		}
 	}
-	if (GetU32(sb + super::kFsByteOrder) != kSuperBlockFsLendian) {
-		throw std::runtime_error(
-			"unsupported byte order (only little-endian volumes are supported)");
-	}
+	return order;
 }
 
 
@@ -36,39 +39,19 @@ BfsReader::BfsReader(ImageFile &image):
 	fImage(image)
 {
 	uint8_t sb[512];
-	fImage.ReadAt(kSuperBlockOffset, sb, sizeof(sb));
-	if (GetU32(sb + super::kMagic1) != kSuperBlockMagic1) {
-		// Fall back to a superblock at offset 0 (see section 2).
-		fImage.ReadAt(0, sb, sizeof(sb));
+	fOrder = ReadSuperBlock(fImage, sb);
+
+	if (U32(sb + super::kMagic2) != kSuperBlockMagic2
+		|| U32(sb + super::kMagic3) != kSuperBlockMagic3) {
+		throw std::runtime_error("not a BFS volume (bad superblock magic)");
 	}
-	RequireMagic(sb);
-
-	fGeometry.blockSize = GetU32(sb + super::kBlockSize);
-	fGeometry.blockShift = GetU32(sb + super::kBlockShift);
-	fGeometry.numBlocks = GetS64(sb + super::kNumBlocks);
-	fGeometry.agShift = GetS32(sb + super::kAgShift);
-	fGeometry.blocksPerAg = GetS32(sb + super::kBlocksPerAg);
-	fGeometry.numAgs = GetS32(sb + super::kNumAgs);
-	fGeometry.logBlocks = GetBlockRun(sb + super::kLogBlocks);
-
-	if (fGeometry.blockSize == 0
-		|| (1u << fGeometry.blockShift) != fGeometry.blockSize
-		|| fGeometry.agShift < 1) {
-		throw std::runtime_error("invalid superblock geometry");
+	// The fs_byte_order marker holds the integer 'BIGE' in the volume's own byte
+	// order; read with fOrder it must come back as that value on either layout.
+	if (U32(sb + super::kFsByteOrder) != kSuperBlockFsLendian) {
+		throw std::runtime_error("superblock byte-order marker is inconsistent");
 	}
 
-	int64_t bitsPerBlock = static_cast<int64_t>(fGeometry.blockSize) * 8;
-	fGeometry.bitmapBlocks = (fGeometry.numBlocks + bitsPerBlock - 1) / bitsPerBlock;
-
-	fUsedBlocks = GetS64(sb + super::kUsedBlocks);
-	fLogStart = GetS64(sb + super::kLogStart);
-	fLogEnd = GetS64(sb + super::kLogEnd);
-	fRootDir = GetBlockRun(sb + super::kRootDir);
-	fIndices = GetBlockRun(sb + super::kIndices);
-
-	size_t nameLen = ::strnlen(reinterpret_cast<const char *>(sb + super::kName),
-		kDiskNameLength);
-	fName.assign(reinterpret_cast<const char *>(sb + super::kName), nameLen);
+	ParseSuperBlock(sb, true);
 
 	if (static_cast<uint64_t>(fGeometry.numBlocks) << fGeometry.blockShift
 			> fImage.Size()) {
@@ -77,27 +60,54 @@ BfsReader::BfsReader(ImageFile &image):
 }
 
 
-void BfsReader::ReloadSuperBlock()
+void BfsReader::ParseSuperBlock(const uint8_t *sb, bool full)
 {
-	uint8_t sb[512];
-	fImage.ReadAt(kSuperBlockOffset, sb, sizeof(sb));
-	if (GetU32(sb + super::kMagic1) != kSuperBlockMagic1) {
-		fImage.ReadAt(0, sb, sizeof(sb));
-	}
-	RequireMagic(sb);
+	if (full) {
+		fGeometry.blockSize = U32(sb + super::kBlockSize);
+		fGeometry.blockShift = U32(sb + super::kBlockShift);
+		fGeometry.agShift = S32(sb + super::kAgShift);
+		fGeometry.blocksPerAg = S32(sb + super::kBlocksPerAg);
 
-	fGeometry.numBlocks = GetS64(sb + super::kNumBlocks);
-	fGeometry.numAgs = GetS32(sb + super::kNumAgs);
-	fGeometry.logBlocks = GetBlockRun(sb + super::kLogBlocks);
+		if (fGeometry.blockSize == 0
+			|| (1u << fGeometry.blockShift) != fGeometry.blockSize
+			|| fGeometry.agShift < 1) {
+			throw std::runtime_error("invalid superblock geometry");
+		}
+
+		size_t nameLen = ::strnlen(reinterpret_cast<const char *>(sb + super::kName),
+			kDiskNameLength);
+		fName.assign(reinterpret_cast<const char *>(sb + super::kName), nameLen);
+	}
+
+	fGeometry.numBlocks = S64(sb + super::kNumBlocks);
+	fGeometry.numAgs = S32(sb + super::kNumAgs);
+	fGeometry.logBlocks = Run(sb + super::kLogBlocks);
 
 	int64_t bitsPerBlock = static_cast<int64_t>(fGeometry.blockSize) * 8;
 	fGeometry.bitmapBlocks = (fGeometry.numBlocks + bitsPerBlock - 1) / bitsPerBlock;
 
-	fUsedBlocks = GetS64(sb + super::kUsedBlocks);
-	fLogStart = GetS64(sb + super::kLogStart);
-	fLogEnd = GetS64(sb + super::kLogEnd);
-	fRootDir = GetBlockRun(sb + super::kRootDir);
-	fIndices = GetBlockRun(sb + super::kIndices);
+	fUsedBlocks = S64(sb + super::kUsedBlocks);
+	fLogStart = S64(sb + super::kLogStart);
+	fLogEnd = S64(sb + super::kLogEnd);
+	fRootDir = Run(sb + super::kRootDir);
+	fIndices = Run(sb + super::kIndices);
+}
+
+
+void BfsReader::ReloadSuperBlock()
+{
+	uint8_t sb[512];
+	fImage.ReadAt(kSuperBlockOffset, sb, sizeof(sb));
+	if (U32(sb + super::kMagic1) != kSuperBlockMagic1) {
+		fImage.ReadAt(0, sb, sizeof(sb));
+	}
+	if (U32(sb + super::kMagic1) != kSuperBlockMagic1
+		|| U32(sb + super::kMagic2) != kSuperBlockMagic2
+		|| U32(sb + super::kMagic3) != kSuperBlockMagic3) {
+		throw std::runtime_error("not a BFS volume (bad superblock magic)");
+	}
+
+	ParseSuperBlock(sb, false);
 }
 
 
@@ -135,34 +145,34 @@ Inode BfsReader::ReadInode(int64_t block)
 	ReadBlock(block, inode.raw.data());
 
 	const uint8_t *p = inode.raw.data();
-	if (GetU32(p + inode::kMagic1) != kInodeMagic1) {
+	if (U32(p + inode::kMagic1) != kInodeMagic1) {
 		throw std::runtime_error("bad inode magic");
 	}
-	if ((GetU32(p + inode::kFlags) & kInodeInUse) == 0) {
+	if ((U32(p + inode::kFlags) & kInodeInUse) == 0) {
 		throw std::runtime_error("inode is not in use");
 	}
 
-	inode.mode = GetU32(p + inode::kMode);
-	inode.flags = GetU32(p + inode::kFlags);
-	inode.uid = GetU32(p + inode::kUid);
-	inode.gid = GetU32(p + inode::kGid);
-	inode.createTime = GetS64(p + inode::kCreateTime);
-	inode.modifiedTime = GetS64(p + inode::kLastModifiedTime);
-	inode.statusChangeTime = GetS64(p + inode::kStatusChangeTime);
-	inode.type = GetU32(p + inode::kType);
-	inode.parent = GetBlockRun(p + inode::kParent);
-	inode.attributes = GetBlockRun(p + inode::kAttributes);
+	inode.mode = U32(p + inode::kMode);
+	inode.flags = U32(p + inode::kFlags);
+	inode.uid = U32(p + inode::kUid);
+	inode.gid = U32(p + inode::kGid);
+	inode.createTime = S64(p + inode::kCreateTime);
+	inode.modifiedTime = S64(p + inode::kLastModifiedTime);
+	inode.statusChangeTime = S64(p + inode::kStatusChangeTime);
+	inode.type = U32(p + inode::kType);
+	inode.parent = Run(p + inode::kParent);
+	inode.attributes = Run(p + inode::kAttributes);
 
 	const uint8_t *ds = p + inode::kData;
 	for (int i = 0; i < kNumDirectBlocks; i++) {
-		inode.stream.direct[i] = GetBlockRun(ds + stream::kDirect + i * 8);
+		inode.stream.direct[i] = Run(ds + stream::kDirect + i * 8);
 	}
-	inode.stream.maxDirectRange = GetS64(ds + stream::kMaxDirectRange);
-	inode.stream.indirect = GetBlockRun(ds + stream::kIndirect);
-	inode.stream.maxIndirectRange = GetS64(ds + stream::kMaxIndirectRange);
-	inode.stream.doubleIndirect = GetBlockRun(ds + stream::kDoubleIndirect);
-	inode.stream.maxDoubleIndirectRange = GetS64(ds + stream::kMaxDoubleIndirectRange);
-	inode.stream.size = GetS64(ds + stream::kSize);
+	inode.stream.maxDirectRange = S64(ds + stream::kMaxDirectRange);
+	inode.stream.indirect = Run(ds + stream::kIndirect);
+	inode.stream.maxIndirectRange = S64(ds + stream::kMaxIndirectRange);
+	inode.stream.doubleIndirect = Run(ds + stream::kDoubleIndirect);
+	inode.stream.maxDoubleIndirectRange = S64(ds + stream::kMaxDoubleIndirectRange);
+	inode.stream.size = S64(ds + stream::kSize);
 	return inode;
 }
 
@@ -193,7 +203,7 @@ BlockRun BfsReader::ResolveRun(const DataStreamInfo &stream, int64_t pos,
 		int64_t entries = static_cast<int64_t>(array.size()) / 8;
 		int64_t end = stream.maxDirectRange;
 		for (int64_t j = 0; j < entries; j++) {
-			BlockRun run = GetBlockRun(array.data() + j * 8);
+			BlockRun run = Run(array.data() + j * 8);
 			if (run.IsZero()) {
 				break;
 			}
@@ -218,13 +228,13 @@ BlockRun BfsReader::ResolveRun(const DataStreamInfo &stream, int64_t pos,
 	std::vector<uint8_t> topBlock(fGeometry.blockSize);
 	ReadBlock(fGeometry.ToBlock(stream.doubleIndirect) + index / runsPerBlock,
 		topBlock.data());
-	BlockRun secondArray = GetBlockRun(topBlock.data() + (index % runsPerBlock) * 8);
+	BlockRun secondArray = Run(topBlock.data() + (index % runsPerBlock) * 8);
 
 	int64_t current = (start % indirectSize) / directSize;
 	std::vector<uint8_t> secondBlock(fGeometry.blockSize);
 	ReadBlock(fGeometry.ToBlock(secondArray) + current / runsPerBlock,
 		secondBlock.data());
-	BlockRun run = GetBlockRun(secondBlock.data() + (current % runsPerBlock) * 8);
+	BlockRun run = Run(secondBlock.data() + (current % runsPerBlock) * 8);
 
 	runStart = stream.maxIndirectRange + index * indirectSize + current * directSize;
 	return run;
@@ -315,11 +325,11 @@ void BfsReader::IterateDirTree(const std::vector<uint8_t> &tree,
 		return;
 	}
 	const uint8_t *base = tree.data();
-	if (GetU32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
+	if (U32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
 		throw std::runtime_error("bad B+tree magic");
 	}
 	int64_t treeSize = static_cast<int64_t>(tree.size());
-	int64_t nodeSize = GetU32(base + btreehdr::kNodeSize);
+	int64_t nodeSize = U32(base + btreehdr::kNodeSize);
 	if (nodeSize <= 0 || nodeSize > treeSize) {
 		throw std::runtime_error("bad B+tree node size");
 	}
@@ -332,29 +342,29 @@ void BfsReader::IterateDirTree(const std::vector<uint8_t> &tree,
 	};
 
 	// Descend to the leftmost leaf.
-	int64_t nodeOffset = GetS64(base + btreehdr::kRootNodePointer);
+	int64_t nodeOffset = S64(base + btreehdr::kRootNodePointer);
 	for (int guard = 0; guard < 64; guard++) {
 		const uint8_t *node = nodeAt(nodeOffset);
-		int64_t overflow = GetS64(node + btreenode::kOverflowLink);
+		int64_t overflow = S64(node + btreenode::kOverflowLink);
 		if (overflow == kBPlusTreeNull) {
 			break;   // a leaf
 		}
-		uint16_t keyCount = GetU16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = GetU16(node + btreenode::kAllKeyLength);
+		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
+		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
 		if (keyCount == 0) {
 			nodeOffset = overflow;
 			continue;
 		}
 		const uint8_t *values = node + KeyAlign(btreenode::kSize + keyLength)
 			+ keyCount * sizeof(uint16_t);
-		nodeOffset = GetS64(values);   // leftmost child
+		nodeOffset = S64(values);   // leftmost child
 	}
 
 	// Walk the leaf chain left to right.
 	while (nodeOffset != kBPlusTreeNull) {
 		const uint8_t *node = nodeAt(nodeOffset);
-		uint16_t keyCount = GetU16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = GetU16(node + btreenode::kAllKeyLength);
+		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
+		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
 		const uint8_t *keys = node + btreenode::kSize;
 		const uint8_t *lengthTable = node + KeyAlign(btreenode::kSize + keyLength);
 		const uint8_t *values = lengthTable + keyCount * sizeof(uint16_t);
@@ -365,17 +375,17 @@ void BfsReader::IterateDirTree(const std::vector<uint8_t> &tree,
 
 		uint16_t previous = 0;
 		for (uint16_t k = 0; k < keyCount; k++) {
-			uint16_t cumulative = GetU16(lengthTable + k * sizeof(uint16_t));
+			uint16_t cumulative = U16(lengthTable + k * sizeof(uint16_t));
 			uint16_t length = static_cast<uint16_t>(cumulative - previous);
 			DirEntry entry;
 			entry.name.assign(reinterpret_cast<const char *>(keys + previous), length);
-			entry.inode = GetS64(values + k * sizeof(int64_t));
+			entry.inode = S64(values + k * sizeof(int64_t));
 			previous = cumulative;
 			if (entry.name != "." && entry.name != "..") {
 				out.push_back(std::move(entry));
 			}
 		}
-		nodeOffset = GetS64(node + btreenode::kRightLink);
+		nodeOffset = S64(node + btreenode::kRightLink);
 	}
 }
 
@@ -396,9 +406,9 @@ void BfsReader::ReadSmallData(const Inode &inode, std::vector<Attribute> &out)
 	const uint8_t *p = start;
 
 	while (p + 8 <= end) {
-		uint32_t type = GetU32(p + 0);
-		uint16_t nameSize = GetU16(p + 4);
-		uint16_t dataSize = GetU16(p + 6);
+		uint32_t type = U32(p + 0);
+		uint16_t nameSize = U16(p + 4);
+		uint16_t dataSize = U16(p + 6);
 		if (nameSize == 0) {
 			break;   // end of the region
 		}
@@ -474,7 +484,7 @@ void BfsReader::ReplayLog()
 			throw std::runtime_error("journal replay did not terminate");
 		}
 		readLogBlock(wrap(position), header.data());
-		int32_t count = GetS32(header.data() + runarray::kCount);
+		int32_t count = S32(header.data() + runarray::kCount);
 		int64_t maxRuns = (blockSize - runarray::kRuns) / 8;
 		if (count < 1 || count > maxRuns) {
 			throw std::runtime_error("corrupt journal run_array");
@@ -483,7 +493,7 @@ void BfsReader::ReplayLog()
 		int64_t dataPosition = wrap(position + 1);
 		int64_t totalData = 0;
 		for (int32_t i = 0; i < count; i++) {
-			BlockRun run = GetBlockRun(header.data() + runarray::kRuns + i * 8);
+			BlockRun run = Run(header.data() + runarray::kRuns + i * 8);
 			int64_t home = fGeometry.ToBlock(run);
 			for (uint16_t b = 0; b < run.length; b++) {
 				readLogBlock(dataPosition, dataBlock.data());

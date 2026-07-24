@@ -17,34 +17,34 @@ namespace {
 
 
 int CompareKey(uint32_t keyType, const uint8_t *a, uint16_t aLen,
-	const uint8_t *b, uint16_t bLen)
+	const uint8_t *b, uint16_t bLen, ByteOrder order)
 {
 	switch (keyType) {
 		case kBPlusTreeInt32Type: {
-			int32_t x = GetS32(a), y = GetS32(b);
+			int32_t x = GetS32(a, order), y = GetS32(b, order);
 			return x < y ? -1 : (x > y ? 1 : 0);
 		}
 		case kBPlusTreeUInt32Type: {
-			uint32_t x = GetU32(a), y = GetU32(b);
+			uint32_t x = GetU32(a, order), y = GetU32(b, order);
 			return x < y ? -1 : (x > y ? 1 : 0);
 		}
 		case kBPlusTreeInt64Type: {
-			int64_t x = GetS64(a), y = GetS64(b);
+			int64_t x = GetS64(a, order), y = GetS64(b, order);
 			return x < y ? -1 : (x > y ? 1 : 0);
 		}
 		case kBPlusTreeUInt64Type: {
-			uint64_t x = GetU64(a), y = GetU64(b);
+			uint64_t x = GetU64(a, order), y = GetU64(b, order);
 			return x < y ? -1 : (x > y ? 1 : 0);
 		}
 		case kBPlusTreeFloatType: {
-			uint32_t xb = GetU32(a), yb = GetU32(b);
+			uint32_t xb = GetU32(a, order), yb = GetU32(b, order);
 			float x, y;
 			::memcpy(&x, &xb, 4);
 			::memcpy(&y, &yb, 4);
 			return x < y ? -1 : (x > y ? 1 : 0);
 		}
 		case kBPlusTreeDoubleType: {
-			uint64_t xb = GetU64(a), yb = GetU64(b);
+			uint64_t xb = GetU64(a, order), yb = GetU64(b, order);
 			double x, y;
 			::memcpy(&x, &xb, 8);
 			::memcpy(&y, &yb, 8);
@@ -74,13 +74,15 @@ struct KeyBound {
 class TreeValidator {
 public:
 	TreeValidator(Findings &findings, const std::vector<uint8_t> &tree,
-		std::string path, uint32_t keyType, bool isDirectory, int64_t numBlocks):
+		std::string path, uint32_t keyType, bool isDirectory, int64_t numBlocks,
+		ByteOrder order):
 		fFindings(findings),
 		fTree(tree),
 		fPath(std::move(path)),
 		fKeyType(keyType),
 		fIsDirectory(isDirectory),
-		fNumBlocks(numBlocks)
+		fNumBlocks(numBlocks),
+		fOrder(order)
 	{
 	}
 
@@ -92,14 +94,14 @@ public:
 			return;
 		}
 		const uint8_t *base = fTree.data();
-		if (GetU32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
+		if (U32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
 			Error("bad B+tree header magic");
 			return;
 		}
-		fNodeSize = GetU32(base + btreehdr::kNodeSize);
-		fMaxSize = GetS64(base + btreehdr::kMaximumSize);
-		uint32_t levels = GetU32(base + btreehdr::kMaxNumberOfLevels);
-		int64_t rootPointer = GetS64(base + btreehdr::kRootNodePointer);
+		fNodeSize = U32(base + btreehdr::kNodeSize);
+		fMaxSize = S64(base + btreehdr::kMaximumSize);
+		uint32_t levels = U32(base + btreehdr::kMaxNumberOfLevels);
+		int64_t rootPointer = S64(base + btreehdr::kRootNodePointer);
 
 		if (fNodeSize < static_cast<int64_t>(btreenode::kSize)
 			|| fNodeSize > static_cast<int64_t>(fTree.size())) {
@@ -153,11 +155,11 @@ private:
 		}
 
 		const uint8_t *node = fTree.data() + offset;
-		int64_t leftLink = GetS64(node + btreenode::kLeftLink);
-		int64_t rightLink = GetS64(node + btreenode::kRightLink);
-		int64_t overflow = GetS64(node + btreenode::kOverflowLink);
-		uint16_t keyCount = GetU16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = GetU16(node + btreenode::kAllKeyLength);
+		int64_t leftLink = S64(node + btreenode::kLeftLink);
+		int64_t rightLink = S64(node + btreenode::kRightLink);
+		int64_t overflow = S64(node + btreenode::kOverflowLink);
+		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
+		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
 
 		int64_t used = KeyAlign(btreenode::kSize + keyLength)
 			+ static_cast<int64_t>(keyCount) * (2 + 8);
@@ -180,7 +182,7 @@ private:
 		std::vector<std::pair<const uint8_t *, uint16_t>> keyList;
 		uint16_t previous = 0;
 		for (uint16_t k = 0; k < keyCount; k++) {
-			uint16_t cumulative = GetU16(lengthTable + k * sizeof(uint16_t));
+			uint16_t cumulative = U16(lengthTable + k * sizeof(uint16_t));
 			if (cumulative < previous) {
 				Error("key-length table not monotonic");
 				return;
@@ -201,13 +203,15 @@ private:
 			const uint8_t *kp = keyList[k].first;
 			uint16_t kl = keyList[k].second;
 			if (k > 0 && CompareKey(fKeyType, keyList[k - 1].first,
-					keyList[k - 1].second, kp, kl) >= 0) {
+					keyList[k - 1].second, kp, kl, fOrder) >= 0) {
 				Error("keys not strictly increasing within node");
 			}
-			if (lower.present && CompareKey(fKeyType, kp, kl, lower.data, lower.length) <= 0) {
+			if (lower.present
+					&& CompareKey(fKeyType, kp, kl, lower.data, lower.length, fOrder) <= 0) {
 				Error("key is not above the lower separator bound");
 			}
-			if (upper.present && CompareKey(fKeyType, kp, kl, upper.data, upper.length) > 0) {
+			if (upper.present
+					&& CompareKey(fKeyType, kp, kl, upper.data, upper.length, fOrder) > 0) {
 				Error("key exceeds the upper separator bound");
 			}
 		}
@@ -215,7 +219,7 @@ private:
 		bool leaf = overflow == kBPlusTreeNull;
 		if (leaf) {
 			for (uint16_t k = 0; k < keyCount; k++) {
-				int64_t value = GetS64(values + k * sizeof(int64_t));
+				int64_t value = S64(values + k * sizeof(int64_t));
 				if (fIsDirectory) {
 					if (value == kBPlusTreeNull) {
 						Error("directory leaf value is -1");
@@ -243,14 +247,14 @@ private:
 			int childDepth = depth + 1;
 			KeyBound previousBound = lower;
 			for (uint16_t k = 0; k < keyCount; k++) {
-				int64_t child = GetS64(values + k * sizeof(int64_t));
+				int64_t child = S64(values + k * sizeof(int64_t));
 				KeyBound separator;
 				separator.data = keyList[k].first;
 				separator.length = keyList[k].second;
 				separator.present = true;
 				if (ValidLink(child)) {
 					int64_t next = (k + 1 < keyCount)
-						? GetS64(values + (k + 1) * sizeof(int64_t))
+						? S64(values + (k + 1) * sizeof(int64_t))
 						: overflow;
 					CheckSiblingLinks(childDepth, child, next, k == 0);
 					ValidateNode(child, previousBound, separator, depth + 1);
@@ -279,11 +283,11 @@ private:
 	{
 		int64_t prev = fPrevAtLevel[static_cast<size_t>(childDepth)];
 		const uint8_t *node = fTree.data() + child;
-		int64_t left = GetS64(node + btreenode::kLeftLink);
-		int64_t right = GetS64(node + btreenode::kRightLink);
+		int64_t left = S64(node + btreenode::kLeftLink);
+		int64_t right = S64(node + btreenode::kRightLink);
 
 		if (isFirstChild && prev != kBPlusTreeNull) {
-			int64_t prevRight = GetS64(fTree.data() + prev + btreenode::kRightLink);
+			int64_t prevRight = S64(fTree.data() + prev + btreenode::kRightLink);
 			if (prevRight != child) {
 				Error("broken level chain: node's right_link does not reach the "
 					"next node at its level", prev);
@@ -316,21 +320,25 @@ private:
 			return;
 		}
 		if (type == static_cast<uint64_t>(kBPlusTreeDuplicateNode)) {
-			int64_t count = GetS64(fTree.data() + offset + 2 * sizeof(int64_t));
+			int64_t count = S64(fTree.data() + offset + 2 * sizeof(int64_t));
 			if (count < 0 || count > kNumDuplicateValues) {
 				Error("duplicate-node count out of range");
 			}
-			int64_t link2 = GetS64(fTree.data() + offset + 1 * sizeof(int64_t));
+			int64_t link2 = S64(fTree.data() + offset + 1 * sizeof(int64_t));
 			int guard = 0;
 			while (link2 != kBPlusTreeNull) {
 				if (!ValidLink(link2) || ++guard > 100000) {
 					Error("bad duplicate-node chain");
 					break;
 				}
-				link2 = GetS64(fTree.data() + link2 + 1 * sizeof(int64_t));
+				link2 = S64(fTree.data() + link2 + 1 * sizeof(int64_t));
 			}
 		}
 	}
+
+	uint16_t U16(const uint8_t *p) const {return GetU16(p, fOrder);}
+	uint32_t U32(const uint8_t *p) const {return GetU32(p, fOrder);}
+	int64_t S64(const uint8_t *p) const {return GetS64(p, fOrder);}
 
 	Findings &fFindings;
 	const std::vector<uint8_t> &fTree;
@@ -338,6 +346,7 @@ private:
 	uint32_t fKeyType;
 	bool fIsDirectory;
 	int64_t fNumBlocks;
+	ByteOrder fOrder;
 	int64_t fNodeSize = 0;
 	int64_t fMaxSize = 0;
 	std::set<int64_t> fVisited;
@@ -354,6 +363,7 @@ Checker::Checker(BfsReader &reader, Findings &findings, const CheckOptions &opti
 	fFindings(findings),
 	fOptions(options),
 	fGeo(reader.GetGeometry()),
+	fOrder(reader.Order()),
 	fReferenced(reader.GetGeometry().numBlocks)
 {
 }
@@ -480,11 +490,14 @@ void Checker::LoadBitmap()
 
 bool Checker::BitmapAllocated(int64_t block) const
 {
-	size_t index = static_cast<size_t>(block >> 3);
-	if (index >= fBitmap.size()) {
+	// The bitmap is a sequence of 32-bit words in the volume's byte order; block N
+	// is bit (N % 32) of word (N / 32) (see BFS_On-Disk_Format.md, block bitmap).
+	size_t wordOffset = static_cast<size_t>(block >> 5) * 4;
+	if (wordOffset + 4 > fBitmap.size()) {
 		return true;   // out of bitmap range: treat as used
 	}
-	return (fBitmap[index] >> (block & 7)) & 1;
+	uint32_t word = U32(fBitmap.data() + wordOffset);
+	return (word >> (block & 31)) & 1;
 }
 
 
@@ -560,7 +573,7 @@ void Checker::CheckDataStream(const Inode &inode, const std::string &path)
 			std::vector<uint8_t> array = ReadRunBytes(s.indirect);
 			int64_t entries = static_cast<int64_t>(array.size()) / 8;
 			for (int64_t j = 0; j < entries; j++) {
-				BlockRun run = GetBlockRun(array.data() + j * 8);
+				BlockRun run = Run(array.data() + j * 8);
 				if (run.IsZero()) {
 					break;
 				}
@@ -589,7 +602,7 @@ void Checker::CheckDataStream(const Inode &inode, const std::string &path)
 			std::vector<uint8_t> top = ReadRunBytes(s.doubleIndirect);
 			int64_t topEntries = static_cast<int64_t>(top.size()) / 8;
 			for (int64_t t = 0; t < topEntries; t++) {
-				BlockRun array = GetBlockRun(top.data() + t * 8);
+				BlockRun array = Run(top.data() + t * 8);
 				if (array.IsZero()) {
 					break;
 				}
@@ -603,7 +616,7 @@ void Checker::CheckDataStream(const Inode &inode, const std::string &path)
 				std::vector<uint8_t> level = ReadRunBytes(array);
 				int64_t entries = static_cast<int64_t>(level.size()) / 8;
 				for (int64_t j = 0; j < entries; j++) {
-					BlockRun run = GetBlockRun(level.data() + j * 8);
+					BlockRun run = Run(level.data() + j * 8);
 					if (run.IsZero()) {
 						break;
 					}
@@ -634,7 +647,7 @@ void Checker::CheckBTree(const std::vector<uint8_t> &tree, uint32_t keyType,
 	bool isDirectory, const std::string &path, std::vector<DirEntry> *entriesOut)
 {
 	TreeValidator validator(fFindings, tree, path, keyType, isDirectory,
-		fGeo.numBlocks);
+		fGeo.numBlocks, fOrder);
 	validator.Validate(entriesOut);
 }
 
@@ -664,7 +677,7 @@ void Checker::CheckInode(int64_t block, const std::string &path, int64_t expecte
 	}
 	Tick();
 
-	BlockRun self = GetBlockRun(inode.raw.data() + inode::kInodeNum);
+	BlockRun self = Run(inode.raw.data() + inode::kInodeNum);
 	if (fGeo.ToBlock(self) != block || self.length != 1) {
 		fFindings.Error("inode", "inode_num does not match the inode's own block",
 			block, path);
@@ -906,17 +919,17 @@ void Checker::OrphanScan()
 		} catch (const std::exception &) {
 			continue;
 		}
-		if (GetU32(buffer.data() + inode::kMagic1) != kInodeMagic1) {
+		if (U32(buffer.data() + inode::kMagic1) != kInodeMagic1) {
 			continue;
 		}
-		if ((GetU32(buffer.data() + inode::kFlags) & kInodeInUse) == 0) {
+		if ((U32(buffer.data() + inode::kFlags) & kInodeInUse) == 0) {
 			continue;
 		}
-		BlockRun self = GetBlockRun(buffer.data() + inode::kInodeNum);
+		BlockRun self = Run(buffer.data() + inode::kInodeNum);
 		if (fGeo.ToBlock(self) != block) {
 			continue;
 		}
-		if (GetS32(buffer.data() + inode::kInodeSize)
+		if (S32(buffer.data() + inode::kInodeSize)
 			!= static_cast<int32_t>(fGeo.blockSize)) {
 			continue;
 		}

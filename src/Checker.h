@@ -66,10 +66,16 @@ private:
 
 	uint32_t KeyTypeFromMode(uint32_t mode) const;
 
+	// On-disk field accessors bound to the volume's byte order.
+	uint32_t U32(const uint8_t *p) const {return GetU32(p, fOrder);}
+	int32_t S32(const uint8_t *p) const {return GetS32(p, fOrder);}
+	BlockRun Run(const uint8_t *p) const {return GetBlockRun(p, fOrder);}
+
 	BfsReader &fReader;
 	Findings &fFindings;
 	CheckOptions fOptions;
 	Geometry fGeo;
+	ByteOrder fOrder;
 	int64_t fReserved = 0;
 	std::vector<uint8_t> fBitmap;
 	BitArray fReferenced;

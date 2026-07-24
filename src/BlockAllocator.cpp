@@ -91,7 +91,7 @@ std::vector<BlockRun> BlockAllocator::AllocateStreamCapped(int64_t blockCount,
 }
 
 
-void BlockAllocator::WriteBitmap(ImageFile &image) const
+void BlockAllocator::WriteBitmap(ImageFile &image, ByteOrder order) const
 {
 	int64_t blockSize = fGeometry.blockSize;
 	int64_t bitmapBytes = fGeometry.bitmapBlocks * blockSize;
@@ -104,6 +104,16 @@ void BlockAllocator::WriteBitmap(ImageFile &image) const
 	// nonexistent block.
 	SetBitRange(bitmap, 0, fCursor);
 	SetBitRange(bitmap, fGeometry.numBlocks, capacityBits);
+
+	// SetBitRange lays bit N at byte N/8 -- i.e. little-endian 32-bit words. For a
+	// big-endian volume the bitmap words are stored byte-swapped, so reverse each
+	// 4-byte group (bitmapBytes is a multiple of the block size, hence of 4).
+	if (order == ByteOrder::Big) {
+		for (size_t i = 0; i + 4 <= bitmap.size(); i += 4) {
+			std::swap(bitmap[i + 0], bitmap[i + 3]);
+			std::swap(bitmap[i + 1], bitmap[i + 2]);
+		}
+	}
 
 	for (int64_t k = 0; k < fGeometry.bitmapBlocks; k++) {
 		image.WriteBlock(1 + k, &bitmap[static_cast<size_t>(k * blockSize)]);

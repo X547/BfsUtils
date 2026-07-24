@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "Endian.h"
 #include "Node.h"
 
 
@@ -24,7 +25,8 @@ struct SmallDataResult {
 // by as many attributes as fit in the remaining inode space. 'smallDataCapacity'
 // is blockSize - inode::kSmallDataStart.
 SmallDataResult BuildSmallData(const std::string &name,
-	const std::vector<Attribute> &attributes, size_t smallDataCapacity);
+	const std::vector<Attribute> &attributes, size_t smallDataCapacity,
+	ByteOrder order = ByteOrder::Little);
 
 
 } // bfs

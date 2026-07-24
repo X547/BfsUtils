@@ -70,6 +70,10 @@ public:
 
 	const Geometry &GetGeometry() const {return fGeometry;}
 
+	// The byte order the volume was created with. Multi-byte on-disk fields must
+	// be read in this order; big-endian volumes are supported read-only.
+	ByteOrder Order() const {return fOrder;}
+
 	// Re-read the superblock after an in-place resize commits, so subsequent
 	// on-demand reads observe the new size, log position, and relocated root /
 	// index directories (used by bfsresize, which re-scans inodes between
@@ -113,8 +117,18 @@ private:
 	BlockRun ResolveRun(const DataStreamInfo &stream, int64_t pos, int64_t &runStart);
 	void ReadSmallData(const Inode &inode, std::vector<Attribute> &out);
 	void IterateDirTree(const std::vector<uint8_t> &tree, std::vector<DirEntry> &out);
+	void ParseSuperBlock(const uint8_t *sb, bool full);
+
+	// On-disk field accessors bound to the volume's byte order.
+	uint16_t U16(const uint8_t *p) const {return GetU16(p, fOrder);}
+	uint32_t U32(const uint8_t *p) const {return GetU32(p, fOrder);}
+	int32_t S32(const uint8_t *p) const {return GetS32(p, fOrder);}
+	uint64_t U64(const uint8_t *p) const {return GetU64(p, fOrder);}
+	int64_t S64(const uint8_t *p) const {return GetS64(p, fOrder);}
+	BlockRun Run(const uint8_t *p) const {return GetBlockRun(p, fOrder);}
 
 	ImageFile &fImage;
+	ByteOrder fOrder = ByteOrder::Little;
 	Geometry fGeometry;
 	BlockRun fRootDir;
 	BlockRun fIndices;

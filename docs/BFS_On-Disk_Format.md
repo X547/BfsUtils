@@ -64,11 +64,12 @@ four-character constant:
 #define SUPER_BLOCK_FS_LENDIAN   'BIGE'   /* the four ASCII bytes B, I, G, E */
 ```
 
-Despite the name of the constant, this marker identifies the byte order used
-when the volume was created. A conforming implementation reads this marker and
-swaps all multi-byte fields accordingly. In practice, volumes are little-endian;
-tools may support big-endian volumes read-only. Every accessor described in this
-document returns the *logical* value after any required swap.
+Despite the name of the constant, this marker records the byte order in which
+the volume's multi-byte fields are stored, fixed when the volume was created.
+The marker is itself a 32-bit integer written in that order, so its bytes read
+as `BIGE` on a big-endian volume and `EGIB` on a little-endian one. Both orders
+are valid, and all multi-byte fields are swapped accordingly. Every accessor
+described in this document returns the *logical* value after any required swap.
 
 Some four-character constants (magic numbers, type tags) are themselves stored
 as 32-bit integers whose bytes spell ASCII. For example `'BFS1'` is the 32-bit
@@ -310,11 +311,11 @@ bitsPerBlock  = block_size * 8;
 bitmapBlocks  = ceil(num_blocks / bitsPerBlock);
 ```
 
-Bit *N* corresponds to block *N* of the whole volume, with bits packed so that
-the bitmap is read in 32-bit little-endian words: within word `w = N / 32`, block
+Bit *N* corresponds to block *N* of the whole volume. The bitmap is an array of
+32-bit words stored in the volume's byte order: within word `w = N / 32`, block
 `N` is represented by bit `N % 32` (the least-significant bit is the lowest block
-number). A driver reading the bitmap as an array of 32-bit words applies the
-volume's byte order to each word before testing bits.
+number). Each word is byte-swapped according to the volume's byte order before
+its bits are tested.
 
 ### Allocation groups
 

@@ -71,7 +71,7 @@ StreamLayout BuildStreamLayout(BlockAllocator &allocator, const Geometry &geomet
 // Fill the 144-byte data_stream region of an inode (at inode::kData) from a
 // computed layout. Supports all three tiers.
 void WriteDataStream(uint8_t *streamFields, const Geometry &geometry,
-	const StreamLayout &layout);
+	const StreamLayout &layout, ByteOrder order = ByteOrder::Little);
 
 
 } // bfs
