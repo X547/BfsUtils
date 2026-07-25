@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "BPlusTreeReader.h"
 #include "Endian.h"
 
 
@@ -14,52 +15,6 @@ namespace bfs {
 
 
 namespace {
-
-
-int CompareKey(uint32_t keyType, const uint8_t *a, uint16_t aLen,
-	const uint8_t *b, uint16_t bLen, ByteOrder order)
-{
-	switch (keyType) {
-		case kBPlusTreeInt32Type: {
-			int32_t x = GetS32(a, order), y = GetS32(b, order);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		case kBPlusTreeUInt32Type: {
-			uint32_t x = GetU32(a, order), y = GetU32(b, order);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		case kBPlusTreeInt64Type: {
-			int64_t x = GetS64(a, order), y = GetS64(b, order);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		case kBPlusTreeUInt64Type: {
-			uint64_t x = GetU64(a, order), y = GetU64(b, order);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		case kBPlusTreeFloatType: {
-			uint32_t xb = GetU32(a, order), yb = GetU32(b, order);
-			float x, y;
-			::memcpy(&x, &xb, 4);
-			::memcpy(&y, &yb, 4);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		case kBPlusTreeDoubleType: {
-			uint64_t xb = GetU64(a, order), yb = GetU64(b, order);
-			double x, y;
-			::memcpy(&x, &xb, 8);
-			::memcpy(&y, &yb, 8);
-			return x < y ? -1 : (x > y ? 1 : 0);
-		}
-		default: {   // string / unknown: unsigned bytewise, shorter first
-			size_t n = std::min(aLen, bLen);
-			int c = n == 0 ? 0 : ::memcmp(a, b, n);
-			if (c != 0) {
-				return c < 0 ? -1 : 1;
-			}
-			return aLen < bLen ? -1 : (aLen > bLen ? 1 : 0);
-		}
-	}
-}
 
 
 struct KeyBound {
@@ -78,6 +33,7 @@ public:
 		ByteOrder order):
 		fFindings(findings),
 		fTree(tree),
+		fReader(tree, order),
 		fPath(std::move(path)),
 		fKeyType(keyType),
 		fIsDirectory(isDirectory),
@@ -89,32 +45,29 @@ public:
 	void Validate(std::vector<DirEntry> *entries)
 	{
 		fEntries = entries;
-		if (fTree.size() < static_cast<size_t>(btreehdr::kSize)) {
-			Error("tree stream smaller than a header");
-			return;
-		}
-		const uint8_t *base = fTree.data();
-		if (U32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
-			Error("bad B+tree header magic");
-			return;
-		}
-		fNodeSize = U32(base + btreehdr::kNodeSize);
-		fMaxSize = S64(base + btreehdr::kMaximumSize);
-		uint32_t levels = U32(base + btreehdr::kMaxNumberOfLevels);
-		int64_t rootPointer = S64(base + btreehdr::kRootNodePointer);
 
-		if (fNodeSize < static_cast<int64_t>(btreenode::kSize)
-			|| fNodeSize > static_cast<int64_t>(fTree.size())) {
-			Error("bad node_size");
-			return;
+		switch (fReader.Open()) {
+			case TreeStatus::Ok:
+				break;
+			case TreeStatus::StreamTooSmall:
+				Error("tree stream smaller than a header");
+				return;
+			case TreeStatus::BadMagic:
+				Error("bad B+tree header magic");
+				return;
+			default:
+				Error("bad node_size");
+				return;
 		}
-		if (fMaxSize != static_cast<int64_t>(fTree.size())) {
+
+		const TreeHeader &header = fReader.Header();
+		if (!fReader.MaxSizeMatchesStream()) {
 			Error("maximum_size does not match the stream size");
 		}
-		if (levels < 1) {
+		if (header.maxNumberOfLevels < 1) {
 			Error("max_number_of_levels is zero");
 		}
-		if (!ValidLink(rootPointer)) {
+		if (!fReader.ValidLink(header.rootNodePointer)) {
 			Error("root_node_pointer out of range");
 			return;
 		}
@@ -124,7 +77,7 @@ public:
 		fPrevAtLevel.assign(128, kBPlusTreeNull);
 
 		KeyBound none;
-		ValidateNode(rootPointer, none, none, 0);
+		ValidateNode(header.rootNodePointer, none, none, 0);
 	}
 
 private:
@@ -133,11 +86,7 @@ private:
 		fFindings.Error("btree", message, block, fPath);
 	}
 
-	bool ValidLink(int64_t link) const
-	{
-		return link >= fNodeSize && link + fNodeSize <= fMaxSize
-			&& (link % fNodeSize) == 0;
-	}
+	bool ValidLink(int64_t link) const {return fReader.ValidLink(link);}
 
 	void ValidateNode(int64_t offset, KeyBound lower, KeyBound upper, int depth)
 	{
@@ -154,72 +103,66 @@ private:
 			return;
 		}
 
-		const uint8_t *node = fTree.data() + offset;
-		int64_t leftLink = S64(node + btreenode::kLeftLink);
-		int64_t rightLink = S64(node + btreenode::kRightLink);
-		int64_t overflow = S64(node + btreenode::kOverflowLink);
-		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
-
-		int64_t used = KeyAlign(btreenode::kSize + keyLength)
-			+ static_cast<int64_t>(keyCount) * (2 + 8);
-		if (used > fNodeSize) {
-			Error("node Used() exceeds node_size");
-			return;
+		// ValidLink() above judged the offset against maximum_size; this also
+		// confirms the node really lies inside the stream that was read, which
+		// differs when the two disagree.
+		TreeNode node;
+		switch (fReader.ReadNodeHeader(offset, node)) {
+			case TreeStatus::Ok:
+				break;
+			case TreeStatus::LinkOutOfRange:
+				Error("node link out of range");
+				return;
+			default:
+				Error("node Used() exceeds node_size");
+				return;
 		}
 
-		if (leftLink != kBPlusTreeNull && !ValidLink(leftLink)) {
+		if (node.leftLink != kBPlusTreeNull && !ValidLink(node.leftLink)) {
 			Error("bad left_link");
 		}
-		if (rightLink != kBPlusTreeNull && !ValidLink(rightLink)) {
+		if (node.rightLink != kBPlusTreeNull && !ValidLink(node.rightLink)) {
 			Error("bad right_link");
 		}
 
-		const uint8_t *keys = node + btreenode::kSize;
-		const uint8_t *lengthTable = node + KeyAlign(btreenode::kSize + keyLength);
-		const uint8_t *values = lengthTable + keyCount * sizeof(uint16_t);
-
-		std::vector<std::pair<const uint8_t *, uint16_t>> keyList;
-		uint16_t previous = 0;
-		for (uint16_t k = 0; k < keyCount; k++) {
-			uint16_t cumulative = U16(lengthTable + k * sizeof(uint16_t));
-			if (cumulative < previous) {
+		// The key table is decoded after the link checks so a node with both a
+		// broken table and a broken sibling link still reports the link.
+		switch (fReader.ReadNodeKeys(node)) {
+			case TreeStatus::Ok:
+				break;
+			case TreeStatus::KeyTableNotMonotonic:
 				Error("key-length table not monotonic");
 				return;
-			}
-			uint16_t length = static_cast<uint16_t>(cumulative - previous);
-			if (length == 0 || length > kBPlusTreeMaxKeyLength) {
+			case TreeStatus::KeyLengthOutOfRange:
 				Error("key length out of range");
 				return;
-			}
-			keyList.push_back({keys + previous, length});
-			previous = cumulative;
-		}
-		if (previous != keyLength) {
-			Error("key-length table end does not match all_key_length");
+			default:
+				// The keys are complete despite the mismatch, so carry on.
+				Error("key-length table end does not match all_key_length");
+				break;
 		}
 
-		for (uint16_t k = 0; k < keyCount; k++) {
-			const uint8_t *kp = keyList[k].first;
-			uint16_t kl = keyList[k].second;
-			if (k > 0 && CompareKey(fKeyType, keyList[k - 1].first,
-					keyList[k - 1].second, kp, kl, fOrder) >= 0) {
+		const std::vector<TreeKey> &keys = node.keys;
+		for (size_t k = 0; k < keys.size(); k++) {
+			const uint8_t *kp = keys[k].data;
+			uint16_t kl = keys[k].length;
+			if (k > 0 && CompareKeys(fKeyType, keys[k - 1].data,
+					keys[k - 1].length, kp, kl, fOrder) >= 0) {
 				Error("keys not strictly increasing within node");
 			}
 			if (lower.present
-					&& CompareKey(fKeyType, kp, kl, lower.data, lower.length, fOrder) <= 0) {
+					&& CompareKeys(fKeyType, kp, kl, lower.data, lower.length, fOrder) <= 0) {
 				Error("key is not above the lower separator bound");
 			}
 			if (upper.present
-					&& CompareKey(fKeyType, kp, kl, upper.data, upper.length, fOrder) > 0) {
+					&& CompareKeys(fKeyType, kp, kl, upper.data, upper.length, fOrder) > 0) {
 				Error("key exceeds the upper separator bound");
 			}
 		}
 
-		bool leaf = overflow == kBPlusTreeNull;
-		if (leaf) {
-			for (uint16_t k = 0; k < keyCount; k++) {
-				int64_t value = S64(values + k * sizeof(int64_t));
+		if (node.IsLeaf()) {
+			for (size_t k = 0; k < keys.size(); k++) {
+				int64_t value = keys[k].value;
 				if (fIsDirectory) {
 					if (value == kBPlusTreeNull) {
 						Error("directory leaf value is -1");
@@ -228,8 +171,7 @@ private:
 					} else if (fEntries != nullptr) {
 						DirEntry entry;
 						entry.name.assign(
-							reinterpret_cast<const char *>(keyList[k].first),
-							keyList[k].second);
+							reinterpret_cast<const char *>(keys[k].data), keys[k].length);
 						entry.inode = value;
 						fEntries->push_back(std::move(entry));
 					}
@@ -238,6 +180,7 @@ private:
 				}
 			}
 		} else {
+			int64_t overflow = node.overflowLink;
 			if (!ValidLink(overflow)) {
 				Error("bad overflow_link");
 				return;
@@ -246,15 +189,15 @@ private:
 			// walk them in key order (see CheckSiblingLinks).
 			int childDepth = depth + 1;
 			KeyBound previousBound = lower;
-			for (uint16_t k = 0; k < keyCount; k++) {
-				int64_t child = S64(values + k * sizeof(int64_t));
+			for (size_t k = 0; k < keys.size(); k++) {
+				int64_t child = keys[k].value;
 				KeyBound separator;
-				separator.data = keyList[k].first;
-				separator.length = keyList[k].second;
+				separator.data = keys[k].data;
+				separator.length = keys[k].length;
 				separator.present = true;
 				if (ValidLink(child)) {
-					int64_t next = (k + 1 < keyCount)
-						? S64(values + (k + 1) * sizeof(int64_t))
+					int64_t next = (k + 1 < keys.size())
+						? keys[k + 1].value
 						: overflow;
 					CheckSiblingLinks(childDepth, child, next, k == 0);
 					ValidateNode(child, previousBound, separator, depth + 1);
@@ -336,19 +279,16 @@ private:
 		}
 	}
 
-	uint16_t U16(const uint8_t *p) const {return GetU16(p, fOrder);}
-	uint32_t U32(const uint8_t *p) const {return GetU32(p, fOrder);}
 	int64_t S64(const uint8_t *p) const {return GetS64(p, fOrder);}
 
 	Findings &fFindings;
 	const std::vector<uint8_t> &fTree;
+	BPlusTreeReader fReader;
 	std::string fPath;
 	uint32_t fKeyType;
 	bool fIsDirectory;
 	int64_t fNumBlocks;
 	ByteOrder fOrder;
-	int64_t fNodeSize = 0;
-	int64_t fMaxSize = 0;
 	std::set<int64_t> fVisited;
 	std::vector<int64_t> fPrevAtLevel;   // per-depth last node offset (sibling chain)
 	std::vector<DirEntry> *fEntries = nullptr;
@@ -366,33 +306,6 @@ Checker::Checker(BfsReader &reader, Findings &findings, const CheckOptions &opti
 	fOrder(reader.Order()),
 	fReferenced(reader.GetGeometry().numBlocks)
 {
-}
-
-
-uint32_t Checker::KeyTypeFromMode(uint32_t mode) const
-{
-	if (mode & kSStrIndex) {
-		return kBPlusTreeStringType;
-	}
-	if (mode & kSIntIndex) {
-		return kBPlusTreeInt32Type;
-	}
-	if (mode & kSUIntIndex) {
-		return kBPlusTreeUInt32Type;
-	}
-	if (mode & kSLongLongIndex) {
-		return kBPlusTreeInt64Type;
-	}
-	if (mode & kSULongLongIndex) {
-		return kBPlusTreeUInt64Type;
-	}
-	if (mode & kSFloatIndex) {
-		return kBPlusTreeFloatType;
-	}
-	if (mode & kSDoubleIndex) {
-		return kBPlusTreeDoubleType;
-	}
-	return kBPlusTreeStringType;
 }
 
 

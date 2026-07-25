@@ -296,6 +296,7 @@ noted. They are the first things to check if a volume fails to mount.
 | File | Responsibility |
 |------|----------------|
 | `BfsFormat.h` / `Endian.h` | On-disk constants, field offsets, endian-aware serialization |
+| `BPlusTreeReader` | Read-only B+tree parsing: header, nodes, keys, duplicates |
 | `Geometry.h` | block ⇄ `block_run` conversion, volume geometry |
 | `SourceScanner` | Walk the source tree into an in-memory model |
 | `Attributes` | Read BFS attributes (`__HAIKU__` only) |

@@ -237,6 +237,37 @@ inline bool DetectByteOrder(const uint8_t *magic1, ByteOrder &order)
 }
 
 
+// The B+tree key type an index's inode mode declares. There is no separate
+// record of an index's key type: the index-type bit in its mode is it (see
+// BFS_On-Disk_Format.md section 13). A mode carrying no index-type bit is
+// treated as a string index, which is what the standard name index is.
+inline uint32_t KeyTypeFromMode(uint32_t mode)
+{
+	if (mode & kSStrIndex) {
+		return kBPlusTreeStringType;
+	}
+	if (mode & kSIntIndex) {
+		return kBPlusTreeInt32Type;
+	}
+	if (mode & kSUIntIndex) {
+		return kBPlusTreeUInt32Type;
+	}
+	if (mode & kSLongLongIndex) {
+		return kBPlusTreeInt64Type;
+	}
+	if (mode & kSULongLongIndex) {
+		return kBPlusTreeUInt64Type;
+	}
+	if (mode & kSFloatIndex) {
+		return kBPlusTreeFloatType;
+	}
+	if (mode & kSDoubleIndex) {
+		return kBPlusTreeDoubleType;
+	}
+	return kBPlusTreeStringType;
+}
+
+
 inline int64_t KeyAlign(int64_t x)
 {
 	return (x + 7) & ~static_cast<int64_t>(7);

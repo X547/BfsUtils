@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "BPlusTreeReader.h"
 #include "Endian.h"
 #include "ImageFile.h"
 
@@ -29,6 +30,25 @@ ByteOrder ReadSuperBlock(ImageFile &image, uint8_t *sb)
 		}
 	}
 	return order;
+}
+
+
+// Wording for the tree problems this reader treats as fatal. A malformed key
+// table is reported as a corrupt leaf: to a caller reading directory entries
+// that is exactly what it means, and stopping beats handing back the garbage
+// names a nonsensical table decodes to.
+const char *TreeErrorMessage(TreeStatus status)
+{
+	switch (status) {
+		case TreeStatus::BadMagic:
+			return "bad B+tree magic";
+		case TreeStatus::BadNodeSize:
+			return "bad B+tree node size";
+		case TreeStatus::LinkOutOfRange:
+			return "B+tree node link out of range";
+		default:
+			return "corrupt B+tree leaf";
+	}
 }
 
 
@@ -321,71 +341,28 @@ std::string BfsReader::ReadSymlink(const Inode &inode)
 void BfsReader::IterateDirTree(const std::vector<uint8_t> &tree,
 	std::vector<DirEntry> &out)
 {
-	if (tree.size() < static_cast<size_t>(btreehdr::kSize)) {
+	BPlusTreeReader treeReader(tree, fOrder);
+
+	// A stream too small to hold a header is an empty tree, not a broken one.
+	TreeStatus status = treeReader.Open();
+	if (status == TreeStatus::StreamTooSmall) {
 		return;
 	}
-	const uint8_t *base = tree.data();
-	if (U32(base + btreehdr::kMagic) != kBPlusTreeMagic) {
-		throw std::runtime_error("bad B+tree magic");
-	}
-	int64_t treeSize = static_cast<int64_t>(tree.size());
-	int64_t nodeSize = U32(base + btreehdr::kNodeSize);
-	if (nodeSize <= 0 || nodeSize > treeSize) {
-		throw std::runtime_error("bad B+tree node size");
+	if (status != TreeStatus::Ok) {
+		throw std::runtime_error(TreeErrorMessage(status));
 	}
 
-	auto nodeAt = [&](int64_t offset) -> const uint8_t * {
-		if (offset < 0 || offset + nodeSize > treeSize) {
-			throw std::runtime_error("B+tree node link out of range");
+	status = treeReader.ForEachLeafEntry([&out](const TreeKey &key) {
+		DirEntry entry;
+		entry.name.assign(reinterpret_cast<const char *>(key.data), key.length);
+		entry.inode = key.value;
+		if (entry.name != "." && entry.name != "..") {
+			out.push_back(std::move(entry));
 		}
-		return base + offset;
-	};
-
-	// Descend to the leftmost leaf.
-	int64_t nodeOffset = S64(base + btreehdr::kRootNodePointer);
-	for (int guard = 0; guard < 64; guard++) {
-		const uint8_t *node = nodeAt(nodeOffset);
-		int64_t overflow = S64(node + btreenode::kOverflowLink);
-		if (overflow == kBPlusTreeNull) {
-			break;   // a leaf
-		}
-		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
-		if (keyCount == 0) {
-			nodeOffset = overflow;
-			continue;
-		}
-		const uint8_t *values = node + KeyAlign(btreenode::kSize + keyLength)
-			+ keyCount * sizeof(uint16_t);
-		nodeOffset = S64(values);   // leftmost child
-	}
-
-	// Walk the leaf chain left to right.
-	while (nodeOffset != kBPlusTreeNull) {
-		const uint8_t *node = nodeAt(nodeOffset);
-		uint16_t keyCount = U16(node + btreenode::kAllKeyCount);
-		uint16_t keyLength = U16(node + btreenode::kAllKeyLength);
-		const uint8_t *keys = node + btreenode::kSize;
-		const uint8_t *lengthTable = node + KeyAlign(btreenode::kSize + keyLength);
-		const uint8_t *values = lengthTable + keyCount * sizeof(uint16_t);
-
-		if (KeyAlign(btreenode::kSize + keyLength) + keyCount * (2 + 8) > nodeSize) {
-			throw std::runtime_error("corrupt B+tree leaf");
-		}
-
-		uint16_t previous = 0;
-		for (uint16_t k = 0; k < keyCount; k++) {
-			uint16_t cumulative = U16(lengthTable + k * sizeof(uint16_t));
-			uint16_t length = static_cast<uint16_t>(cumulative - previous);
-			DirEntry entry;
-			entry.name.assign(reinterpret_cast<const char *>(keys + previous), length);
-			entry.inode = S64(values + k * sizeof(int64_t));
-			previous = cumulative;
-			if (entry.name != "." && entry.name != "..") {
-				out.push_back(std::move(entry));
-			}
-		}
-		nodeOffset = S64(node + btreenode::kRightLink);
+		return true;
+	});
+	if (status != TreeStatus::Ok) {
+		throw std::runtime_error(TreeErrorMessage(status));
 	}
 }
 

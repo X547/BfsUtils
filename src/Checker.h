@@ -64,8 +64,6 @@ private:
 	void SetPhase(const char *phase);
 	void Tick();
 
-	uint32_t KeyTypeFromMode(uint32_t mode) const;
-
 	// On-disk field accessors bound to the volume's byte order.
 	uint32_t U32(const uint8_t *p) const {return GetU32(p, fOrder);}
 	int32_t S32(const uint8_t *p) const {return GetS32(p, fOrder);}
