@@ -137,11 +137,27 @@ void Resizer::StageDirtyBitmap()
 
 int64_t Resizer::CountUsed(int64_t numBlocks) const
 {
+	// Popcount the allocated bits in [0, numBlocks): whole 64-bit words first, then
+	// leftover whole bytes, then the partial final byte. Counting only [0, numBlocks)
+	// (rather than the whole in-memory bitmap) is what makes this correct on the
+	// shrink path, where the bitmap still describes the larger pre-shrink volume and
+	// its middle is free rather than allocated padding.
+	int64_t fullBytes = numBlocks >> 3;
+	const uint8_t *data = fBitmap.data();
 	int64_t count = 0;
-	for (int64_t block = 0; block < numBlocks; block++) {
-		if (Allocated(block)) {
-			count++;
-		}
+	int64_t i = 0;
+	for (; i + 8 <= fullBytes; i += 8) {
+		uint64_t word;
+		memcpy(&word, data + i, sizeof(word));
+		count += __builtin_popcountll(word);
+	}
+	for (; i < fullBytes; i++) {
+		count += __builtin_popcount(data[i]);
+	}
+	int rem = static_cast<int>(numBlocks & 7);
+	if (rem != 0) {
+		count += __builtin_popcount(
+			static_cast<unsigned>(data[fullBytes] & ((1u << rem) - 1)));
 	}
 	return count;
 }
@@ -204,43 +220,56 @@ void Resizer::Grow(int64_t newNum)
 		return;
 	}
 
-	// General path: cross one bitmap boundary at a time. Each iteration first
-	// advances the committed size (so relocations target committed free space and
-	// any interruption leaves a mountable volume at the last committed size), then
-	// vacates the single block the enlarged reserved prefix claims, then appends
-	// the bitmap block and shifts the empty log forward.
-	while (fGeo.bitmapBlocks < finalBitmap) {
-		int64_t curB = fGeo.bitmapBlocks;
-		int64_t capacity = curB * bitsPerBlock;   // current bitmap covers [0, capacity)
+	// General path. Growing the bitmap by (finalBitmap - startBitmap) blocks expands
+	// the reserved prefix (boot + bitmap + log) by the same amount. With the log in
+	// its standard position right after the bitmap, the newly-claimed blocks form one
+	// contiguous range [Reserved(startBitmap), Reserved(finalBitmap)) immediately past
+	// the current log. Evacuate that whole range ONCE, then append the bitmap blocks
+	// one boundary at a time as pure metadata. Doing the relocation up front rather
+	// than per boundary turns O(boundaries) full-filesystem scans into a single scan.
+	int64_t startBitmap = fGeo.bitmapBlocks;
+	int64_t startCapacity = startBitmap * bitsPerBlock;
 
-		// (a) Fill the current bitmap to capacity (metadata only).
-		if (fGeo.numBlocks < capacity) {
-			GrowInPlace(capacity);
-		}
+	// Fill the current bitmap to capacity first (metadata only) so the relocation has
+	// the entire committed tail available as target space. startCapacity <= newNum
+	// here, since finalBitmap > startBitmap means newNum exceeds startCapacity.
+	if (fGeo.numBlocks < startCapacity) {
+		GrowInPlace(startCapacity);
+	}
 
-		// (b) Evacuate the block the enlarged reserved prefix will take over: the
-		// first block past the log. Relocate whatever run/inode overlaps it into
-		// free space no later boundary can reclaim ([Reserved(finalBitmap), capacity)).
-		int64_t src = Reserved(curB);
-		fWinLo = src;
-		fWinHi = src + 1;
-		fAllocLow = Reserved(finalBitmap);
-		fAllocHigh = fGeo.numBlocks;   // == capacity
-		RelocateInWindow();
-		if (Allocated(src)) {
+	// Evacuate the reserved-expansion range into committed free space no later step
+	// can reclaim ([Reserved(finalBitmap), numBlocks)). Idempotent on re-run: any
+	// blocks already vacated by an interrupted attempt simply have nothing to move.
+	fWinLo = Reserved(startBitmap);
+	fWinHi = Reserved(finalBitmap);
+	fAllocLow = Reserved(finalBitmap);
+	fAllocHigh = fGeo.numBlocks;
+	RelocateInWindow();
+	for (int64_t block = fWinLo; block < fWinHi; block++) {
+		if (Allocated(block)) {
 			throw std::runtime_error("reserved-expansion block still allocated after "
 				"relocation (unreferenced allocated block?); run bfscheck");
 		}
-
-		// (c) Append the bitmap block, shift the log, and extend into the newly
-		// addressable region.
-		int64_t nextCapacity = (curB + 1) * bitsPerBlock;
-		int64_t stepTarget = std::min(newNum, nextCapacity);
-		AddBitmapBlock(stepTarget);
 	}
 
 	if (fRelocated > 0) {
 		fprintf(stderr, "\n");
+	}
+
+	// Append one bitmap block per boundary. Each iteration is metadata only now that
+	// the reserved expansion is free: fill the current bitmap to capacity, take over
+	// the old log's head block for the new bitmap block, and shift the empty log
+	// forward by one (into an already-vacated block). Each commit leaves a mountable
+	// volume, so an interrupted run can be resumed.
+	while (fGeo.bitmapBlocks < finalBitmap) {
+		int64_t curB = fGeo.bitmapBlocks;
+		int64_t capacity = curB * bitsPerBlock;   // current bitmap covers [0, capacity)
+		if (fGeo.numBlocks < capacity) {
+			GrowInPlace(capacity);
+		}
+		int64_t nextCapacity = (curB + 1) * bitsPerBlock;
+		int64_t stepTarget = std::min(newNum, nextCapacity);
+		AddBitmapBlock(stepTarget);
 	}
 }
 
