@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <bit>
 #include <stdexcept>
 #include <utility>
 
@@ -149,14 +150,14 @@ int64_t Resizer::CountUsed(int64_t numBlocks) const
 	for (; i + 8 <= fullBytes; i += 8) {
 		uint64_t word;
 		memcpy(&word, data + i, sizeof(word));
-		count += __builtin_popcountll(word);
+		count += std::popcount(word);
 	}
 	for (; i < fullBytes; i++) {
-		count += __builtin_popcount(data[i]);
+		count += std::popcount(data[i]);
 	}
 	int rem = static_cast<int>(numBlocks & 7);
 	if (rem != 0) {
-		count += __builtin_popcount(
+		count += std::popcount(
 			static_cast<unsigned>(data[fullBytes] & ((1u << rem) - 1)));
 	}
 	return count;

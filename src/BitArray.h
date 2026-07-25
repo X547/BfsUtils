@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <bit>
 #include <vector>
 
 
@@ -45,7 +46,7 @@ public:
 	{
 		int64_t count = 0;
 		for (uint8_t byte : fWords) {
-			count += __builtin_popcount(byte);
+			count += std::popcount(byte);
 		}
 		return count;
 	}
