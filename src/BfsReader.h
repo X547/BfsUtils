@@ -87,6 +87,13 @@ public:
 	int64_t UsedBlocks() const {return fUsedBlocks;}
 	bool IsClean() const {return fLogStart == fLogEnd;}
 
+	// Superblock fields the readers do not need themselves, exposed so a dump
+	// can report the volume header as it is actually stored.
+	uint32_t InodeSize() const {return fInodeSize;}
+	uint32_t Flags() const {return fFlags;}
+	int64_t LogStart() const {return fLogStart;}
+	int64_t LogEnd() const {return fLogEnd;}
+
 	// Replay the journal into the overlay so subsequent reads observe the
 	// post-transaction state (see BFS_On-Disk_Format.md section 14).
 	void ReplayLog();
@@ -102,6 +109,11 @@ public:
 	std::vector<DirEntry> ReadDirectory(const Inode &inode);
 	std::vector<Attribute> ReadAttributes(const Inode &inode);
 
+	// Just the attributes packed into the inode block itself. ReadAttributes()
+	// merges these with the ones stored as separate inodes; a dump reports the
+	// two separately, because where an attribute lives is part of the layout.
+	void ReadSmallData(const Inode &inode, std::vector<Attribute> &out);
+
 	// Raw block read (consults the journal overlay). Exposed for the integrity
 	// checker, which needs low-level access beyond the high-level readers.
 	void ReadBlock(int64_t block, uint8_t *out);
@@ -115,7 +127,6 @@ public:
 private:
 	std::vector<uint8_t> ReadRun(const BlockRun &run);
 	BlockRun ResolveRun(const DataStreamInfo &stream, int64_t pos, int64_t &runStart);
-	void ReadSmallData(const Inode &inode, std::vector<Attribute> &out);
 	void IterateDirTree(const std::vector<uint8_t> &tree, std::vector<DirEntry> &out);
 	void ParseSuperBlock(const uint8_t *sb, bool full);
 
@@ -135,6 +146,8 @@ private:
 	int64_t fLogStart = 0;
 	int64_t fLogEnd = 0;
 	int64_t fUsedBlocks = 0;
+	uint32_t fInodeSize = 0;
+	uint32_t fFlags = 0;
 	std::string fName;
 	std::map<int64_t, std::vector<uint8_t>> fOverlay;
 };

@@ -106,6 +106,8 @@ void BfsReader::ParseSuperBlock(const uint8_t *sb, bool full)
 	int64_t bitsPerBlock = static_cast<int64_t>(fGeometry.blockSize) * 8;
 	fGeometry.bitmapBlocks = (fGeometry.numBlocks + bitsPerBlock - 1) / bitsPerBlock;
 
+	fInodeSize = U32(sb + super::kInodeSize);
+	fFlags = U32(sb + super::kFlags);
 	fUsedBlocks = S64(sb + super::kUsedBlocks);
 	fLogStart = S64(sb + super::kLogStart);
 	fLogEnd = S64(sb + super::kLogEnd);

@@ -73,3 +73,25 @@ bfsmap_sources = [
 executable('bfsmap', bfsmap_sources,
 	dependencies : [libpng_dep],
 	install : true)
+
+
+# RapidJSON is header-only and ships its pkg-config file under either spelling
+# depending on the distribution. Mark it as a system include so its own headers
+# do not trip this project's warning level.
+rapidjson_dep = dependency('RapidJSON', required : false)
+if not rapidjson_dep.found()
+	rapidjson_dep = dependency('rapidjson')
+endif
+
+bfsdump_sources = [
+	'src/ImageFile.cpp',
+	'src/BfsReader.cpp',
+	'src/BPlusTreeReader.cpp',
+	'src/JsonWriter.cpp',
+	'src/Dumper.cpp',
+	'src/dump_main.cpp',
+]
+
+executable('bfsdump', bfsdump_sources,
+	dependencies : [rapidjson_dep.as_system('system')],
+	install : true)

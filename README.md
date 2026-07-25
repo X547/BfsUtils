@@ -1,4 +1,4 @@
-# BfsUtils — `makebfs`, `bfsextract`, `bfscheck`
+# BfsUtils — `makebfs`, `bfsextract`, `bfscheck`, `bfsresize`, `bfsmap`, `bfsdump`
 
 **BfsUtils** is a set of filesystem-aware tools for **BFS** (the Be File System):
 
@@ -18,6 +18,9 @@
 - **`bfsmap`** renders a BFS image's block usage as a color-coded PNG
   (read-only), so you can see at a glance how the volume is laid out and how
   fragmented it is.
+- **`bfsdump`** writes a BFS image's on-disk structures as JSON (read-only) —
+  the superblock, individual inodes, data streams, directories, indices, and
+  B+trees, either as their logical content or node by node.
 
 Both work with the on-disk layout described in
 [`docs/BFS_On-Disk_Format.md`](docs/BFS_On-Disk_Format.md). No Haiku driver
@@ -36,9 +39,11 @@ ninja -C build
 The result is `build/makebfs`. It builds on any POSIX-compatible system and on
 Haiku. Attribute archiving is compiled in only under `__HAIKU__`.
 
-`bfsmap` links against **libpng** (found via `pkg-config`); the other tools have
-no external dependencies. Install libpng development headers first — for example
-`libpng-dev` on Debian/Ubuntu, `libpng_devel` on Haiku.
+`bfsmap` links against **libpng** and `bfsdump` against **RapidJSON** (both found
+via `pkg-config`); the other tools have no external dependencies. Install the
+development headers first — for example `libpng-dev` and `rapidjson-dev` on
+Debian/Ubuntu, `libpng_devel` on Haiku. RapidJSON is header-only, so it costs
+nothing at run time.
 
 On the remote Haiku machine (see `local/ENVIRONMENT.md`):
 
@@ -215,6 +220,64 @@ bfsmap payload.bfs                    # writes payload.bfs.png
 bfsmap --width 512 --scale 2 data.bfs data.png
 ```
 
+### `bfsdump`
+
+```sh
+bfsdump [options] <image>
+```
+
+| Section (repeatable) | Meaning |
+| --- | --- |
+| `--superblock` | Volume header, geometry, log state, and derived counts (the default). |
+| `--inode SPEC` | One inode's fields, decoded. |
+| `--data-stream SPEC` | That inode's `data_stream`, tier by tier, with every run. |
+| `--directory SPEC` | Directory entries. |
+| `--index` | List the volume's indices with their key types. |
+| `--index=NAME` | Dump one index as a sorted key → inodes map. |
+| `--btree SPEC` | B+tree as a sorted key → value(s) map. |
+| `--btree-nodes SPEC` | B+tree node by node, with links, fill, and stats. |
+
+| Option | Meaning |
+| --- | --- |
+| `--depth N` | Recursion depth for `--directory` (default 1). |
+| `--attributes` | Include attributes in `--inode` output. |
+| `--max-entries N` | Cap entries per directory or tree. |
+| `--max-nodes N` | Cap nodes per `--btree-nodes` dump. |
+| `--max-data N` | Cap dumped blob bytes (default 256). |
+| `--replay-log` | Dump the post-replay state of an unclean volume. |
+| `--compact` | Single-line JSON (default: indented). |
+| `-o, --output FILE` | Write to `FILE` instead of stdout. |
+
+A **SPEC** selects an inode and is one of: an absolute path inside the volume
+(`/system/packages`), a block number (`2073` or `0x819`), a `block_run`
+(`group:start:length`), or the names `root` and `indices`. Every option also
+accepts the `--option=value` form; `--index` needs it, since a bare `--index`
+means "list them all".
+
+The two B+tree formats answer different questions. `--btree` gives the tree's
+**content**: leaf entries in key order, keys decoded per the index's key type,
+and duplicate containers expanded so every entry carries a plain `values` array.
+`--btree-nodes` gives its **structure**: every node breadth-first with its
+level, sibling links, key table, fill percentage, the free-node chain, and any
+node-sized slot that nothing accounts for. The node view reads all nodes
+directly, so it still works on a tree whose leaf chain is broken. The two agree
+by construction — a map's `entry_count` equals the node view's
+`stats.leaf_keys`, the remaining keys being internal separators.
+
+Output is JSON on stdout, so it composes with `jq` and friends. A structure that
+cannot be read becomes an `"error"` or `"status"` member on its own section
+rather than aborting the run, so a damaged volume still yields a complete,
+parseable document.
+
+```sh
+bfsdump payload.bfs                             # superblock
+bfsdump --index payload.bfs                     # what is indexed
+bfsdump --index=name --max-entries 20 data.bfs  # the name index, first 20 keys
+bfsdump --btree-nodes=/system data.bfs          # a directory tree's structure
+bfsdump --inode /system/packages --attributes --data-stream /system/packages data.bfs
+bfsdump --compact --directory root data.bfs | jq '.directories[0].entries[].name'
+```
+
 ## What gets written
 
 - **Superblock** at byte offset 512, in the selected byte order (see `--endian`),
@@ -297,6 +360,8 @@ noted. They are the first things to check if a volume fails to mount.
 |------|----------------|
 | `BfsFormat.h` / `Endian.h` | On-disk constants, field offsets, endian-aware serialization |
 | `BPlusTreeReader` | Read-only B+tree parsing: header, nodes, keys, duplicates |
+| `JsonWriter` | Streaming JSON output over RapidJSON's SAX writer |
+| `Dumper` | Render a volume's structures as JSON (`bfsdump`) |
 | `Geometry.h` | block ⇄ `block_run` conversion, volume geometry |
 | `SourceScanner` | Walk the source tree into an in-memory model |
 | `Attributes` | Read BFS attributes (`__HAIKU__` only) |
