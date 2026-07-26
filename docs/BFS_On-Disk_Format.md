@@ -188,11 +188,13 @@ when checking):
 
 ```c
 allocation_group >= 0
-allocation_group <= num_ags
-start            <= (1 << ag_shift)
+allocation_group <  num_ags
+start            <  (1 << ag_shift)
 length           != 0
 (start + length) <= (1 << ag_shift)
 ```
+
+Note the asymmetry: `allocation_group` and `start` are bounded *strictly* (a group index is `0 .. num_ags - 1` and a start is `0 .. (1 << ag_shift) - 1`), whereas `start + length` may equal `1 << ag_shift` because it is a one-past-the-end offset. A run must not cross an allocation-group boundary.
 
 Two runs are *mergeable* when they are in the same group, adjacent
 (`a.start + a.length == b.start`), and their combined length does not exceed
@@ -229,7 +231,7 @@ struct disk_super_block {
     inode_addr  root_dir;                   // block_run of the root directory
     inode_addr  indices;                    // block_run of the index directory
     int32       _reserved[8];
-    int32       pad_to_block[87];           // pad the structure out to a block
+    int32       pad_to_block[87];           // pad the structure out to 512 bytes
 };
 ```
 
@@ -269,9 +271,12 @@ struct disk_super_block {
 - **`flags`** — `'CLEN'` if the volume was cleanly unmounted, `'DIRT'` otherwise.
 - **`log_blocks`** — a `block_run` giving the location and length (in blocks) of
   the journal.
-- **`log_start` / `log_end`** — offsets (in blocks, relative to the start of the
-  log area) of the head and tail of the active log. When they are equal, the log
-  is empty and the volume is consistent.
+- **`log_start` / `log_end`** — block positions of the head and tail of the
+  active log, **interpreted modulo `log_blocks.length`** (the log is circular).
+  A freshly formatted volume stores them as the *absolute* block number of the
+  start of the log area, so the raw value may exceed `log_blocks.length`; reduce
+  modulo the length before use. When they are equal, the log is empty and the
+  volume is consistent.
 - **`root_dir`** — the `block_run` of the root directory inode.
 - **`indices`** — the `block_run` of the index directory inode (may be a zero run
   if the volume has no indices).
@@ -290,7 +295,28 @@ ag_shift  >= 1
 blocks_per_ag >= 1
 num_blocks >= 10
 num_ags == ceil(num_blocks / (1 << ag_shift))
+
+// bitmap geometry must be internally consistent: a full group's bitmap slice
+// covers exactly one allocation group's worth of blocks
+blocks_per_ag * block_size * 8 == (1 << ag_shift)
+
+// accounting bounds
+0 <= used_blocks <= num_blocks
+
+// the log area is a well-formed run that lies within the volume
+log_blocks is a well-formed block_run within the volume
+
+// the log pointers are non-negative; see the note below on their interpretation
+log_start >= 0
+log_end   >= 0
 ```
+
+**Do not bound `log_start` / `log_end` by `log_blocks.length`.** They are log
+positions *interpreted modulo* `log_blocks.length`, and a freshly formatted
+volume stores them as the **absolute** block number of the start of the log area
+(see [Section 17](#17-creating-a-fresh-volume), step 4), which routinely exceeds
+`log_blocks.length` on larger volumes. Only `>= 0` may be asserted here; the
+modulo reduction happens at use. See [Section 14](#14-the-journal-log).
 
 The superblock is written back to disk at byte offset 512.
 
@@ -317,6 +343,15 @@ Bit *N* corresponds to block *N* of the whole volume. The bitmap is an array of
 number). Each word is byte-swapped according to the volume's byte order before
 its bits are tested.
 
+The bitmap's last block usually has more bits than the volume has blocks. The
+state of these **trailing padding bits — those at index `>= num_blocks` — is
+unspecified**: some implementations set them, others leave them clear, and
+neither is required. A reader must therefore **bound every bitmap scan by
+`num_blocks`** (and, per group, by that group's own bit count), never relying on
+the padding bits as terminators. A checker must not require them to be either set
+or clear, and must count only real blocks (`0 .. num_blocks - 1`) toward
+`used_blocks`.
+
 ### Allocation groups
 
 The bitmap is partitioned into `num_ags` allocation groups. Group *i* owns a
@@ -329,9 +364,10 @@ group[i].num_bits           = blocks_per_ag * block_size * 8;
 ```
 
 That is, each group governs `num_bits == (1 << ag_shift)` volume blocks. The
-**last** group may be smaller: its `num_bits` equals the number of blocks that
-remain (`num_blocks - i * bitsPerGroup`), and its bitmap block count is
-`1 + ((num_bits - 1) >> (block_shift + 3))`.
+**last** group may be smaller: with `bitsPerGroup == (1 << ag_shift)` (the number
+of volume blocks a full group governs), its `num_bits` equals the number of
+blocks that remain (`num_blocks - i * bitsPerGroup`), and its bitmap block count
+is `1 + ((num_bits - 1) >> (block_shift + 3))`.
 
 The mapping from a `block_run` back to the bitmap is implicit: the run's
 `allocation_group` selects the group, and `start` is the bit index within that
@@ -456,10 +492,14 @@ Classification rules:
 - **Attribute directory** — `(mode & (S_ATTR_DIR|S_ATTR|S_INDEX_DIR)) ==
   S_ATTR_DIR`.
 - **Attribute** — `(mode & (S_ATTR_DIR|S_ATTR|S_INDEX_DIR)) == S_ATTR`.
-- **Index directory / index** — carries `S_INDEX_DIR`. The index *root* directory
-  is **not** distinguished by its mode (it carries permission bits and a type bit
-  just like an individual index); it is identified structurally, as the inode
-  referenced by `superblock.indices`.
+- **Index directory / index** — both carry `S_INDEX_DIR`. The most robust way to
+  identify the index *root* directory is **structural**: it is the inode
+  referenced by `superblock.indices`. At the mode level the two are distinguished
+  by their **permission bits**, not their type bits: the index root carries real
+  permission bits (Haiku formats it `0700`), whereas an **individual index carries
+  zero permission bits**. So a nonzero `(mode & 0777)` on an `S_INDEX_DIR` inode
+  marks the root, and zero marks an individual index. Prefer the structural test;
+  use the permission-bit test only when a mode is all you have.
 - **Symlink** — `S_ISLNK(mode)`.
 
 ### The key-type bit on containers
@@ -547,21 +587,41 @@ struct data_stream {
 
 - **`size`** is the logical length of the stream in bytes.
 - **`max_direct_range`** is the number of bytes covered by the direct runs (the
-  sum of `direct[i].length` blocks, in bytes). File position `pos` is served from
-  the direct runs when `max_direct_range == 0` *or* `pos < max_direct_range`.
+  sum of `direct[i].length` blocks, in bytes).
 - **`max_indirect_range`** is the byte offset up to which the indirect block adds
-  coverage.
+  coverage. A value of `0` means the stream has **no indirect tier** (it lives
+  entirely in the direct runs); this is the field that gates whether the indirect
+  tiers exist at all.
 - **`max_double_indirect_range`** is the byte offset up to which the
-  double-indirect block adds coverage.
+  double-indirect block adds coverage. A value of `0` means there is no
+  double-indirect tier.
 
 These "max range" fields let a reader decide which tier to consult without
-walking every run.
+walking every run. The gate is keyed on `max_indirect_range`, not
+`max_direct_range`: the indirect tiers are consulted only when
+`max_indirect_range > 0`. See the tier conditions below.
 
 ### Resolving a file position to a `block_run`
 
-Given a byte position `pos` within `[0, size)`:
+Given a byte position `pos` within `[0, size)`, select the tier as follows (this
+is the exact gate; the three cases are mutually exclusive and exhaustive):
 
-**1. Direct range** (`max_direct_range == 0 || pos < max_direct_range`):
+```c
+if (max_indirect_range > 0 && pos >= max_direct_range) {
+    if (max_double_indirect_range > 0 && pos >= max_indirect_range)
+        // case 3: double-indirect
+    else
+        // case 2: indirect
+} else {
+    // case 1: direct
+}
+```
+
+Note the gate is on `max_indirect_range`, not `max_direct_range`: when
+`max_indirect_range == 0` the stream has no indirect tier and *all* positions
+resolve in the direct runs, regardless of `max_direct_range`.
+
+**1. Direct range** (`max_indirect_range == 0 || pos < max_direct_range`):
 
 Walk `direct[0..11]`, accumulating each run's byte length until the accumulated
 end exceeds `pos`. The matching run and the byte offset of the run's start are
@@ -581,8 +641,8 @@ for (current = 0; current < NUM_DIRECT_BLOCKS; current++) {
 }
 ```
 
-**2. Indirect range** (`pos >= max_direct_range` and
-`pos < max_indirect_range`):
+**2. Indirect range** (`max_indirect_range > 0`, `pos >= max_direct_range`, and
+`pos < max_indirect_range` — or `max_double_indirect_range == 0`):
 
 `indirect` is a `block_run` whose blocks form a flat array of `block_run`
 entries: `runs_per_block = block_size / sizeof(block_run)` per block, across
@@ -616,15 +676,28 @@ offset = max_indirect_range + index * indirectSize + current * directSize;
 ```
 
 Every run in the double-indirect tier has the same fixed block length
-(`double_indirect.length`), which is why the arithmetic is exact rather than
-requiring a scan.
+(`double_indirect.length`, i.e. `base`), which is why the arithmetic is exact
+rather than requiring a scan.
+
+**How a writer picks `base`.** `base` is the fixed per-run length used
+throughout the double-indirect tier, and it is also the number of blocks in each
+second-level array (which is why `index / runsPerBlock` and `current /
+runsPerBlock` above index correctly into `base`-block spans). BFS uses
+`NUM_ARRAY_BLOCKS == 4` as this length, so `base` is normally `4` and
+`double_indirect.length == 4`. `DOUBLE_INDIRECT_ARRAY_SIZE == 4096` is the same
+quantity in bytes at the reference 1024-byte block size (`NUM_ARRAY_BLOCKS <<
+10`). `base` must be a power of two so that it divides the (power-of-two)
+allocation-group size, which keeps every `base`-length run inside a single group
+once its start is `base`-aligned. A reader never needs these constants — it takes
+`base` directly from `double_indirect.length` — but a formatter must honor them
+when laying out the tier.
 
 ### Reading bytes
 
 Once the containing `run` and the stream `offset` of that run's start are known,
 the byte offset within the run is `pos - offset`. Convert the run to a block
 number, add `(pos - offset) >> block_shift` blocks, and read from
-`blockNumber << block_shift + ((pos - offset) & (block_size - 1))`. Reads that
+`(blockNumber << block_shift) + ((pos - offset) & (block_size - 1))`. Reads that
 cross run boundaries repeat the resolution for the next position. Reads are
 clamped to `size`.
 
@@ -708,6 +781,16 @@ name tag rather than a textual key:
 To read a node's name: iterate the `small_data` records and find the one whose
 first name byte equals `0x13` and whose `name_size` equals 1; its `data` is the
 NUL-terminated name string.
+
+Only **regular nodes** (files, plain directories, symlinks) carry this `0x13`
+name record. Attribute inodes and index inodes do **not** — their names live only
+as keys in the parent container's B+tree — so a name lookup by `0x13` record
+applies to regular nodes alone.
+
+A file name is at most `INODE_FILE_NAME_LENGTH` (256) bytes *including* the
+terminating NUL — i.e. up to 255 characters, matching the
+`BPLUSTREE_MAX_KEY_LENGTH` (256) limit on the directory-tree key that indexes it
+and the `MAX_INDEX_KEY_LENGTH` (255, excluding NUL) limit on an indexed value.
 
 ### Small attributes vs. large attributes
 
@@ -913,6 +996,11 @@ MakeLink(type, off, fragIndex)
       = ((int64)type << 62) | (off & 0x3ffffffffffffc00) | (fragIndex & 0x3ff);
 ```
 
+The `& (2|3)` in `IsDuplicate` is just `& 3`; it reads as a mask only because
+the two duplicate tags happen to be `2` and `3`. In practice `LinkType(link)`
+is only ever `0` (a direct inode number) or `2`/`3` (a duplicate reference) —
+type `1` does not occur — so the test reduces to "top two bits non-zero".
+
 A **duplicate array** is the on-disk container of the actual values:
 
 ```c
@@ -956,9 +1044,10 @@ To enumerate all inodes for a duplicated key, resolve the link's type, read the
 ### Free nodes
 
 Deleted tree nodes are put on a singly linked free list headed by
-`free_node_pointer`; a free node's `left_link` stores the next free offset and it
-is marked with `BPLUSTREE_FREE`. A reader can ignore the free list; it matters
-only for writers reusing space.
+`free_node_pointer`. A free node is marked by setting its `overflow_link` to
+`BPLUSTREE_FREE`, and its `left_link` stores the byte offset of the next free
+node (or `BPLUSTREE_NULL` at the end of the list). A reader can ignore the free
+list; it matters only for writers reusing space.
 
 ---
 
@@ -969,13 +1058,19 @@ B+tree. The tree maps **entry name → inode number**.
 
 - Keys are the UTF-8 entry names.
 - Leaf values are the inode numbers (block numbers) of the entries.
-- The special entries `.` and `..` **are** stored as ordinary tree keys: `.`'s
-  value is the directory's own inode number and `..`'s value is the parent
-  directory's inode number (for the root directory, `..` maps to the root
-  itself). They are ordinary keys subject to the normal ordering, so `.` (byte
-  `0x2e`) is **not** necessarily the first key: any name whose leading byte is
-  below `0x2e` (for example `!`, `#`, `+`, `,`, `-`) sorts before it. Like every
-  B+tree, the keys — including `.` and `..` — are held in full sorted order.
+- In a **plain directory** the special entries `.` and `..` **are** stored as
+  ordinary tree keys: `.`'s value is the directory's own inode number and `..`'s
+  value is the parent directory's inode number (for the root directory, `..` maps
+  to the root itself). They are ordinary keys subject to the normal ordering, so
+  `.` (byte `0x2e`) is **not** necessarily the first key: any name whose leading
+  byte is below `0x2e` (for example `!`, `#`, `+`, `,`, `-`) sorts before it. Like
+  every B+tree, the keys — including `.` and `..` — are held in full sorted order.
+  **This applies to plain directories only.** The internal directory-like
+  containers — attribute directories, the index directory, and individual indices
+  — do **not** contain `.` or `..` entries; their trees hold only real keys
+  (attribute names, index names, or indexed values). A reader must not assume
+  those two entries exist in every `S_ISDIR` tree, and a writer must not add them
+  to those containers.
 - To list a directory, open the B+tree in its data stream and iterate leaves in
   key order. For each entry, the value is the child inode number; load that inode
   to obtain its type, size, timestamps, etc. The `parent` `block_run` in each
@@ -997,7 +1092,8 @@ lazily — `attributes` is a zero run until the first large attribute is added.
 
 - The attribute directory is itself an inode with `S_ATTR_DIR` set in its `mode`;
   its data stream holds a directory B+tree keyed by attribute name, whose values
-  are the attribute inode numbers.
+  are the attribute inode numbers. Being an internal container, its tree does
+  **not** contain `.` or `..` entries (see [Section 11](#11-directories)).
 - Each **attribute inode** has `S_ATTR` set in its `mode`,
   stores the attribute's data-type code in its `type` field, and stores the
   attribute value in its data stream (`data_stream.size` bytes).
@@ -1015,15 +1111,18 @@ example, by name, by size, or by last-modified time). All indices live under a
 single **index directory**, referenced by `superblock.indices`.
 
 - The index directory is an inode carrying `S_INDEX_DIR | S_IFDIR | S_STR_INDEX`
-  (plus permission bits). Its data stream is a directory B+tree keyed by index
-  name, whose values are the individual index inodes. It is not distinguished
-  from an individual index by its mode — its mode is the same as a string index —
-  but structurally, as the inode `superblock.indices` points to.
+  **plus real permission bits** (Haiku formats it `0700`). Its data stream is a
+  directory B+tree keyed by index name, whose values are the individual index
+  inodes. It is identified primarily *structurally*, as the inode
+  `superblock.indices` points to; at the mode level it is told apart from an
+  individual index by its nonzero permission bits (see [Section 6](#6-inodes)).
 - Each **index** is an inode carrying `S_INDEX_DIR | S_IFDIR` together with one of
-  the index-type bits (`S_STR_INDEX`, `S_INT_INDEX`, `S_LONG_LONG_INDEX`, etc.).
-  Its data stream is a B+tree whose key type matches both that type bit and the
-  indexed attribute's data type, and whose leaf values are inode numbers (using
-  the duplicate mechanism, since many files can share the same attribute value).
+  the index-type bits (`S_STR_INDEX`, `S_INT_INDEX`, `S_LONG_LONG_INDEX`, etc.),
+  and **zero permission bits**. Its data stream is a B+tree whose key type matches
+  both that type bit and the indexed attribute's data type, and whose leaf values
+  are inode numbers (using the duplicate mechanism, since many files can share the
+  same attribute value). Unlike a plain directory, an index's tree does **not**
+  contain `.` or `..` entries (see [Section 11](#11-directories)).
 - Standard indices commonly created at volume initialization include:
   - `name` — string index
   - `size` — int64 index
@@ -1060,9 +1159,14 @@ modifies; on replay, those blocks are written back to their home locations.
 
 - `superblock.log_blocks` — a `block_run` giving the first block and the length
   (in blocks) of the log area.
-- `superblock.log_start` / `superblock.log_end` — head and tail offsets, measured
-  in blocks **relative to the start of the log area**, and interpreted modulo the
-  log length (the log is circular).
+- `superblock.log_start` / `superblock.log_end` — head and tail positions of the
+  log, **interpreted modulo the log length** `log_blocks.length` (the log is
+  circular). The stored value is *not* guaranteed to already be reduced: a
+  freshly formatted volume writes the absolute block number of the log's start
+  (see [Section 17](#17-creating-a-fresh-volume)), which can be larger than the
+  log length, so a reader must apply `% log_blocks.length` before using either
+  pointer. All arithmetic below (including `freeLogBlocks` and replay) operates on
+  the reduced positions.
 - When `log_start == log_end`, the log is empty and the volume is consistent.
 - `superblock.flags` is `'DIRT'` while a mount is active and `'CLEN'` after a
   clean unmount.
@@ -1090,17 +1194,31 @@ struct run_array {
 
 - The `run_array` occupies exactly one log block; `runs[]` fills the rest of the
   block.
-- `max_runs` capacity for a block:
+- The number of runs that fit in one block is:
 
   ```c
+  // sizeof(run_array) == 8 (two int32s); sizeof(block_run) == 8
   maxCount = (block_size - sizeof(run_array)) / sizeof(block_run);
-  MaxRuns  = (maxCount < 128) ? maxCount : 127;   // capped at 127
+  MaxRuns  = (maxCount < 128) ? maxCount : 127;   // BFS never writes more than 127
   ```
 
-  Note: the stored `max_runs` value is one greater than the usable count — an
-  off-by-one that a validator must tolerate. Consistency check: the effective
-  usable maximum is `MaxRuns(block_size) - 1`, and `count` must be in
-  `[1, usableMax]`.
+  For `block_size == 1024` this gives `MaxRuns == 127`.
+
+  **The stored `max_runs` field and the usable `count` are governed by a
+  historical off-by-one** that a conforming writer must reproduce and a reader
+  must expect:
+
+  - **A writer must store `max_runs == MaxRuns(block_size)` exactly** (e.g. `127`
+    at 1 KiB) and must place **at most `MaxRuns(block_size) - 1`** runs in the
+    entry (e.g. `126`). The reference driver rejects any log entry whose stored
+    `max_runs` differs from `MaxRuns`, or whose `count` exceeds `MaxRuns - 1`,
+    with "Log entry has broken header!" — so writing `max_runs` any other way, or
+    packing `MaxRuns` runs, produces entries the driver will not replay. (The
+    `-1` originates in Be's original BFS and is preserved for compatibility.)
+  - **A reader** should therefore expect `max_runs == MaxRuns(block_size)` and
+    `count` in `[1, MaxRuns(block_size) - 1]` — for 1 KiB blocks, `max_runs`
+    field `== 127` and valid `count` in `[1, 126]`. A reader may be more lenient
+    (accepting `count` up to `MaxRuns`), but must not require more than that.
 - The runs are sorted by allocation group then start block, and each must be a
   valid `block_run` within the volume.
 
@@ -1123,8 +1241,13 @@ end of the log area).
 
 ### Replaying the log
 
-On mount, if `log_start != log_end` the log must be replayed (regardless of the
-`'CLEN'`/`'DIRT'` flag, though a mismatch is worth noting):
+On mount, if `log_start != log_end` the log must be replayed. The `log_start ==
+log_end` test — not the `flags` field — is the authoritative signal that the log
+is empty and the volume is consistent, so replay proceeds whenever the pointers
+differ regardless of whether `flags` reads `'CLEN'` or `'DIRT'`. A *disagreement*
+between the two (a non-empty log on a `'CLEN'` volume, or an empty log on a
+`'DIRT'` volume) indicates the volume was not shut down through the normal path;
+it does not change what replay does, but a checker should report it as a warning:
 
 1. Set `start = log_start`.
 2. While `start != log_end`:
@@ -1170,11 +1293,14 @@ encoded = ((int64)seconds << INODE_TIME_SHIFT) + unique_from_nsec(nanoseconds);
 
 The low 16 bits hold the sub-second information produced by `unique_from_nsec`:
 
-- For a **non-zero** nanosecond value, bits `[15:4]` (masked by
-  `INODE_TIME_MASK = 0xfff0`) encode the nanoseconds scaled into a 12-bit field
-  (`((nsec + 16383) >> 14)`), and the low 4 bits carry a small monotonically
-  increasing counter to spread otherwise-identical timestamps across index
-  buckets.
+- For a **non-zero** nanosecond value, bits `[15:4]` hold the nanoseconds scaled
+  down and masked into place directly: `field = ((nsec + 16383) >> 14) &
+  INODE_TIME_MASK`, where `INODE_TIME_MASK == 0xfff0`. There is **no** extra
+  left-shift — the `>> 14` already positions the value, and the mask clears the
+  low 4 bits. Those low 4 bits then carry a small monotonically increasing
+  counter to spread otherwise-identical timestamps across index buckets. For the
+  largest representable nanosecond value the field tops out around `0xEE60`,
+  which stays clear of the reserved `0xF000` range below.
 - For a **zero** nanosecond value, the low 12 bits hold a counter and the pattern
   `0xf000` is OR-ed in, i.e. bits `[15:12] == 0xF`. This range (`0xF000`–`0xFFFF`)
   is reserved to mark "no real sub-second timestamp".
@@ -1188,8 +1314,16 @@ seconds = encoded >> INODE_TIME_SHIFT;
 if ((encoded & 0xF000) == 0xF000)
     nanoseconds = 0;                                  // reserved "no sub-second" range
 else
-    nanoseconds = (encoded & INODE_TIME_MASK) << 14;  // reconstruct ~10^9-scale value
+    nanoseconds = (encoded & INODE_TIME_MASK) << 14;  // exact inverse of the >> 14 encode
 ```
+
+The `<< 14` decode is the exact inverse of the `>> 14` encode: because the
+encoding masks the scaled value into bits `[15:4]` without any additional shift,
+`(encoded & 0xfff0)` recovers that scaled value, and shifting it back left by 14
+reconstructs the nanoseconds. The only information lost is the low 4 bits, which
+are consumed by the uniquing counter rather than by the timestamp — so the
+sub-second value is quantized to roughly a quarter-millisecond, never scaled or
+displaced.
 
 The extra low-bit entropy exists specifically so that time-based index keys are
 well distributed even when many files share the same whole-second timestamp. For
@@ -1225,8 +1359,12 @@ A robust mount / open sequence:
   are damaged.
 - **Reconstructing hierarchy**: each inode records its `parent` `block_run`, so
   parent/child relationships can be rebuilt independent of directory B+trees.
-- **Names**: even if a directory tree is corrupt, each inode's own name is in its
-  `small_data` region (the record tagged `0x13`), enabling name recovery.
+- **Names**: for a **regular node** (a file, plain directory, or symlink), even
+  if a directory tree is corrupt the node's own name is in its `small_data`
+  region (the record tagged `0x13`), enabling name recovery. **Attribute and
+  index inodes do not carry a `0x13` name record** — their names exist only as
+  keys in the parent container's B+tree (the owner's attribute directory or the
+  index directory), so recovering those names requires that tree.
 - **Free vs. used**: cross-check the bitmap against the set of blocks actually
   referenced by inode data streams (direct, indirect, double-indirect runs), the
   bitmap blocks, and the log. `used_blocks` should match the count of set bits.
@@ -1254,7 +1392,9 @@ For completeness, the initialization procedure that a formatter follows:
    2048 blocks normally, 4096 blocks for volumes over 1 GiB). Place the log
    immediately after the bitmap: `log_blocks` starts at block
    `bitmapBlocks + 1` with the chosen length. Set `log_start = log_end =
-   ToBlock(log_blocks)`.
+   ToBlock(log_blocks)` — i.e. the absolute block number of the log's start;
+   readers reduce these modulo `log_blocks.length`
+   ([Section 14](#14-the-journal-log)).
 5. Write and clear the bitmap; mark the boot block, the bitmap, and the log as
    used; set `used_blocks` accordingly.
 6. Create the root directory inode (mode `S_IFDIR | S_STR_INDEX` plus permission
@@ -1263,11 +1403,20 @@ For completeness, the initialization procedure that a formatter follows:
    pointing at the root itself for the root directory), sorted in with any other
    entries ([Section 11](#11-directories)).
 7. Optionally create the index directory (mode `S_INDEX_DIR | S_IFDIR |
-   S_STR_INDEX`) and the standard indices (`name`, `size`, `last_modified`,
-   `BEOS:APP_SIG`), recording the index directory in `superblock.indices`. Give
-   each container the key-type bit matching its tree ([Section 6](#6-inodes)).
-8. Erase the legacy boot sector (offset 0) and any foreign superblock at offset
-   1024 to avoid misidentification.
+   S_STR_INDEX` **plus permission bits**, e.g. `0700`) and the standard indices
+   (`name`, `size`, `last_modified`, `BEOS:APP_SIG`), recording the index
+   directory in `superblock.indices`. Give each container the key-type bit
+   matching its tree ([Section 6](#6-inodes)). Each **individual index** is
+   created with **zero permission bits** — that is how it is told apart from the
+   index root at the mode level — and, being an internal container, its tree
+   (like the index directory's and any attribute directory's) **does not** get
+   `.` or `..` entries ([Section 11](#11-directories)).
+8. Zero the two byte ranges that other filesystems place their identifying
+   structures in, so the fresh BFS volume cannot be misidentified as something
+   else: the legacy boot sector at **offset 0**, and **offset 1024** (where a
+   number of other filesystems — for example ext2/3/4 — keep their primary
+   superblock). This is purely defensive scrubbing of *foreign* metadata; BFS's
+   own superblock lives at offset 512 and is untouched.
 9. Set `flags = 'CLEN'`, write the superblock at offset 512, and flush.
 
 ---
