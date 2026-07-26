@@ -64,8 +64,25 @@ makebfs [options] <source-directory> <output-image>
       --endian ORDER   on-disk byte order: little (default) or big
       --no-index       do not generate the standard BFS indices
       --no-attributes  do not archive BFS attributes (Haiku only)
+  -v, --verbose        print each scanned and written path
+      --no-progress    do not show the progress indicator
   -h, --help
 ```
+
+While it works, `makebfs` reports its phases on stderr — the scan, the plan, and
+then the write, which counts every block it emits:
+
+```
+scanning      12483 entries
+planning      12483 / 12483 nodes
+indexing
+laying out
+writing        71%  1.02 GiB / 1.44 GiB   38.4 MiB/s
+```
+
+The indicator appears only when stderr is a terminal, so redirected output is
+unaffected; `--no-progress` suppresses it there too. `-v` replaces the single
+updating line with one line per path, and remains useful in a pipe.
 
 Examples:
 

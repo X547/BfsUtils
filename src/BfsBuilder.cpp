@@ -72,7 +72,8 @@ int64_t ChooseLogBlocks(uint64_t volumeBytes)
 
 
 void WriteBytesStream(ImageFile &image, const Geometry &geometry,
-	const std::vector<BlockRun> &runs, const uint8_t *data, uint64_t size)
+	const std::vector<BlockRun> &runs, const uint8_t *data, uint64_t size,
+	Progress &progress)
 {
 	uint32_t blockSize = geometry.blockSize;
 	std::vector<uint8_t> block(blockSize);
@@ -88,6 +89,7 @@ void WriteBytesStream(ImageFile &image, const Geometry &geometry,
 				::memcpy(block.data(), data + offset, take);
 			}
 			image.WriteBlock(startBlock + b, block.data());
+			progress.Advance(blockSize);
 			offset += blockSize;
 		}
 	}
@@ -97,7 +99,8 @@ void WriteBytesStream(ImageFile &image, const Geometry &geometry,
 // Write one contiguous array run (indirect array, double-indirect top array, or a
 // second-level array) filled with 'count' block_run entries and zero-padded.
 void WriteRunArray(ImageFile &image, const Geometry &geometry,
-	const BlockRun &arrayRun, const BlockRun *entries, size_t count, ByteOrder order)
+	const BlockRun &arrayRun, const BlockRun *entries, size_t count, ByteOrder order,
+	Progress &progress)
 {
 	uint32_t blockSize = geometry.blockSize;
 	std::vector<uint8_t> buffer(static_cast<size_t>(arrayRun.length) * blockSize, 0);
@@ -107,21 +110,24 @@ void WriteRunArray(ImageFile &image, const Geometry &geometry,
 	int64_t start = geometry.ToBlock(arrayRun);
 	for (uint16_t b = 0; b < arrayRun.length; b++) {
 		image.WriteBlock(start + b, buffer.data() + static_cast<size_t>(b) * blockSize);
+		progress.Advance(blockSize);
 	}
 }
 
 
 // Serialize the indirect / double-indirect array blocks referenced by a layout.
 void WriteArrayBlocks(ImageFile &image, const Geometry &geometry,
-	const StreamLayout &layout, ByteOrder order)
+	const StreamLayout &layout, ByteOrder order, Progress &progress)
 {
 	if (!layout.indirect.IsZero()) {
 		WriteRunArray(image, geometry, layout.indirect,
-			layout.indirectEntries.data(), layout.indirectEntries.size(), order);
+			layout.indirectEntries.data(), layout.indirectEntries.size(), order,
+			progress);
 	}
 	if (!layout.doubleIndirect.IsZero()) {
 		WriteRunArray(image, geometry, layout.doubleIndirect,
-			layout.ddSecondArrays.data(), layout.ddSecondArrays.size(), order);
+			layout.ddSecondArrays.data(), layout.ddSecondArrays.size(), order,
+			progress);
 		int64_t entriesPerSecond = layout.base * (static_cast<int64_t>(geometry.blockSize) / 8);
 		size_t total = layout.ddDataRuns.size();
 		for (size_t s = 0; s < layout.ddSecondArrays.size(); s++) {
@@ -129,14 +135,41 @@ void WriteArrayBlocks(ImageFile &image, const Geometry &geometry,
 			size_t remaining = offset < total ? total - offset : 0;
 			size_t count = std::min(remaining, static_cast<size_t>(entriesPerSecond));
 			WriteRunArray(image, geometry, layout.ddSecondArrays[s],
-				layout.ddDataRuns.data() + offset, count, order);
+				layout.ddDataRuns.data() + offset, count, order, progress);
 		}
 	}
 }
 
 
+// The scanned tree's size, which is the denominator of the planning phase.
+// Attribute directories and index inodes are planned on top of this, so it is a
+// lower bound on the inodes eventually created, not on the PlanNode calls it
+// actually counts.
+int64_t CountNodes(const Node &node)
+{
+	int64_t count = 1;
+	for (const std::unique_ptr<Node> &child : node.children) {
+		count += CountNodes(*child);
+	}
+	return count;
+}
+
+
+// Blocks WriteArrayBlocks will emit for a layout: the indirect array, the
+// double-indirect top array, and every second-level array under it.
+int64_t ArrayBlockCount(const StreamLayout &layout)
+{
+	int64_t blocks = layout.indirect.length + layout.doubleIndirect.length;
+	for (const BlockRun &run : layout.ddSecondArrays) {
+		blocks += run.length;
+	}
+	return blocks;
+}
+
+
 void WriteFileStream(ImageFile &image, const Geometry &geometry,
-	const std::vector<BlockRun> &runs, const std::string &path, uint64_t size)
+	const std::vector<BlockRun> &runs, const std::string &path, uint64_t size,
+	Progress &progress)
 {
 	int fd = ::open(path.c_str(), O_RDONLY);
 	if (fd < 0) {
@@ -170,6 +203,7 @@ void WriteFileStream(ImageFile &image, const Geometry &geometry,
 				got += static_cast<size_t>(r);
 			}
 			image.WriteBlock(startBlock + b, block.data());
+			progress.Advance(blockSize);
 			offset += blockSize;
 		}
 	}
@@ -181,8 +215,9 @@ void WriteFileStream(ImageFile &image, const Geometry &geometry,
 } // unnamed namespace
 
 
-BfsBuilder::BfsBuilder(const BuildOptions &options):
-	fOptions(options)
+BfsBuilder::BfsBuilder(const BuildOptions &options, Progress &progress):
+	fOptions(options),
+	fProgress(progress)
 {
 }
 
@@ -211,6 +246,8 @@ int64_t BfsBuilder::FirstFreeBlock() const
 
 int BfsBuilder::PlanNode(Node &node, int parentPlan, bool isRoot)
 {
+	fProgress.Advance();
+
 	int index = NewInode();
 	node.inodePlanIndex = index;
 	size_t capacity = fOptions.blockSize - inode::kSmallDataStart;
@@ -548,6 +585,24 @@ int64_t BfsBuilder::StreamBlocks(const InodePlan &plan) const
 }
 
 
+int64_t BfsBuilder::BlocksToWrite() const
+{
+	// The superblock is a 512-byte write rather than a whole block; counting it
+	// as one keeps the arithmetic simple and is lost in the rounding.
+	int64_t blocks = 1 + fGeometry.bitmapBlocks;
+
+	// plan.metadataBlocks is the pre-placement upper bound, so the actual array
+	// blocks have to come from the layout Place produced.
+	for (const InodePlan &plan : fInodes) {
+		blocks += 1 + ArrayBlockCount(plan.layout);
+		for (const BlockRun &run : plan.layout.DataRuns()) {
+			blocks += run.length;
+		}
+	}
+	return blocks;
+}
+
+
 void BfsBuilder::ComputeGeometry()
 {
 	uint32_t blockSize = fOptions.blockSize;
@@ -709,24 +764,27 @@ void BfsBuilder::SerializeInode(ImageFile &image, InodePlan &plan)
 	}
 
 	image.WriteBlock(plan.block, buffer.data());
+	fProgress.Advance(blockSize);
 
 	// Indirect / double-indirect array blocks (empty for direct-only streams).
-	WriteArrayBlocks(image, fGeometry, plan.layout, fOptions.byteOrder);
+	WriteArrayBlocks(image, fGeometry, plan.layout, fOptions.byteOrder, fProgress);
 
 	std::vector<BlockRun> dataRuns = plan.layout.DataRuns();
 	switch (plan.streamKind) {
 		case StreamKind::File:
-			WriteFileStream(image, fGeometry, dataRuns, plan.filePath, plan.streamSize);
+			fProgress.Note(plan.filePath);
+			WriteFileStream(image, fGeometry, dataRuns, plan.filePath, plan.streamSize,
+				fProgress);
 			break;
 		case StreamKind::Bytes:
 			WriteBytesStream(image, fGeometry, dataRuns, plan.bytes.data(),
-				plan.streamSize);
+				plan.streamSize, fProgress);
 			break;
 		case StreamKind::Tree: {
 			std::vector<uint8_t> treeBytes;
 			plan.tree->Serialize(treeBytes, TreeValues(plan));
 			WriteBytesStream(image, fGeometry, dataRuns, treeBytes.data(),
-				treeBytes.size());
+				treeBytes.size(), fProgress);
 			break;
 		}
 		case StreamKind::None:
@@ -773,8 +831,15 @@ void BfsBuilder::SerializeSuperBlock(ImageFile &image, int64_t usedBlocks,
 
 void BfsBuilder::Build(Node &root, const std::string &outputPath)
 {
+	fProgress.BeginCountPhase("planning", "nodes", CountNodes(root));
 	fRootPlan = PlanNode(root, -1, true);
+
+	// The indices sort and build a B+tree over every content node, which is not
+	// instant on a large tree but has no natural per-item unit to count.
+	fProgress.BeginPhase("indexing");
 	PlanIndices();
+
+	fProgress.BeginPhase("laying out");
 
 	// Provisional geometry (data only) fixes the block size and group geometry the
 	// indirect-tier reservation depends on; then reserve array/alignment blocks and
@@ -800,12 +865,21 @@ void BfsBuilder::Build(Node &root, const std::string &outputPath)
 		indicesRun = fGeometry.ToRun(fInodes[fIndexDirPlan].block, 1);
 	}
 
+	// Every block written counts the same, whatever it holds; the byte figures on
+	// screen are just that count scaled by the block size.
+	fProgress.BeginBytePhase("writing", BlocksToWrite() * fGeometry.blockSize);
+
 	SerializeSuperBlock(image, allocator.UsedBlocks(), indicesRun);
+	fProgress.Advance(fGeometry.blockSize);
+
 	allocator.WriteBitmap(image, fOptions.byteOrder);
+	fProgress.Advance(fGeometry.bitmapBlocks * fGeometry.blockSize);
+
 	for (InodePlan &plan : fInodes) {
 		SerializeInode(image, plan);
 	}
 	image.Flush();
+	fProgress.Finish();
 }
 
 

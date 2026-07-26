@@ -2,7 +2,6 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -48,10 +47,10 @@ std::string ReadLinkTarget(const std::string &path)
 
 
 std::unique_ptr<Node> ScanEntry(const std::string &path, const std::string &name,
-	bool readAttributes);
+	bool readAttributes, Progress &progress);
 
 
-void ScanChildren(Node &node, bool readAttributes)
+void ScanChildren(Node &node, bool readAttributes, Progress &progress)
 {
 	DIR *dir = ::opendir(node.sourcePath.c_str());
 	if (dir == nullptr) {
@@ -66,7 +65,8 @@ void ScanChildren(Node &node, bool readAttributes)
 			continue;
 		}
 		std::string childPath = node.sourcePath + "/" + name;
-		std::unique_ptr<Node> child = ScanEntry(childPath, name, readAttributes);
+		std::unique_ptr<Node> child = ScanEntry(childPath, name, readAttributes,
+			progress);
 		if (child != nullptr) {
 			node.children.push_back(std::move(child));
 		}
@@ -83,12 +83,15 @@ void ScanChildren(Node &node, bool readAttributes)
 
 
 std::unique_ptr<Node> ScanEntry(const std::string &path, const std::string &name,
-	bool readAttributes)
+	bool readAttributes, Progress &progress)
 {
 	struct stat info;
 	if (::lstat(path.c_str(), &info) != 0) {
 		throw std::system_error(errno, std::generic_category(), "lstat " + path);
 	}
+
+	progress.Advance();
+	progress.Note(path);
 
 	auto node = std::make_unique<Node>();
 	node->name = name;
@@ -106,7 +109,7 @@ std::unique_ptr<Node> ScanEntry(const std::string &path, const std::string &name
 
 	if (S_ISDIR(info.st_mode)) {
 		node->kind = NodeKind::Directory;
-		ScanChildren(*node, readAttributes);
+		ScanChildren(*node, readAttributes, progress);
 	} else if (S_ISLNK(info.st_mode)) {
 		node->kind = NodeKind::Symlink;
 		node->linkTarget = ReadLinkTarget(path);
@@ -116,7 +119,7 @@ std::unique_ptr<Node> ScanEntry(const std::string &path, const std::string &name
 		node->dataSize = static_cast<uint64_t>(info.st_size);
 	} else {
 		// Skip sockets, fifos, and device nodes: BFS archives regular content.
-		fprintf(stderr, "makebfs: skipping unsupported node %s\n", path.c_str());
+		progress.Message("makebfs: skipping unsupported node " + path);
 		return nullptr;
 	}
 
@@ -131,8 +134,11 @@ std::unique_ptr<Node> ScanEntry(const std::string &path, const std::string &name
 } // unnamed namespace
 
 
-std::unique_ptr<Node> ScanSource(const std::string &rootPath, bool readAttributes)
+std::unique_ptr<Node> ScanSource(const std::string &rootPath, bool readAttributes,
+	Progress &progress)
 {
+	progress.BeginCountPhase("scanning", "entries");
+
 	struct stat info;
 	if (::stat(rootPath.c_str(), &info) != 0) {
 		throw std::system_error(errno, std::generic_category(), "stat " + rootPath);
@@ -140,6 +146,9 @@ std::unique_ptr<Node> ScanSource(const std::string &rootPath, bool readAttribute
 	if (!S_ISDIR(info.st_mode)) {
 		throw std::runtime_error(rootPath + " is not a directory");
 	}
+
+	progress.Advance();
+	progress.Note(rootPath);
 
 	auto root = std::make_unique<Node>();
 	root->kind = NodeKind::Directory;
@@ -159,7 +168,7 @@ std::unique_ptr<Node> ScanSource(const std::string &rootPath, bool readAttribute
 	if (readAttributes) {
 		ReadNodeAttributes(rootPath, root->attributes);
 	}
-	ScanChildren(*root, readAttributes);
+	ScanChildren(*root, readAttributes, progress);
 	return root;
 }
 

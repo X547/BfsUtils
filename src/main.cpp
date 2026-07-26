@@ -9,6 +9,7 @@
 
 #include "BfsBuilder.h"
 #include "Node.h"
+#include "Progress.h"
 #include "SourceScanner.h"
 
 
@@ -30,6 +31,8 @@ void PrintUsage(const char *program)
 		"      --endian ORDER   on-disk byte order: little (default) or big\n"
 		"      --no-index       do not generate the standard BFS indices\n"
 		"      --no-attributes  do not archive BFS attributes (Haiku only)\n"
+		"  -v, --verbose        print each scanned and written path\n"
+		"      --no-progress    do not show the progress indicator\n"
 		"  -h, --help           show this help\n",
 		program);
 }
@@ -96,6 +99,8 @@ int main(int argc, char **argv)
 	std::string source;
 	std::string output;
 	bool haveName = false;
+	bool verbose = false;
+	bool noProgress = false;
 
 	int i = 1;
 	for (; i < argc; i++) {
@@ -107,6 +112,10 @@ int main(int argc, char **argv)
 			options.generateIndices = false;
 		} else if (arg == "--no-attributes") {
 			options.readAttributes = false;
+		} else if (arg == "-v" || arg == "--verbose") {
+			verbose = true;
+		} else if (arg == "--no-progress") {
+			noProgress = true;
 		} else if (arg == "-b" || arg == "--block-size") {
 			if (++i >= argc) {
 				fprintf(stderr, "%s: missing value for %s\n", argv[0], arg.c_str());
@@ -172,11 +181,18 @@ int main(int argc, char **argv)
 		options.volumeName = BaseName(source);
 	}
 
+	// Off when stderr is not a terminal, so redirected output stays clean. The
+	// verbose path log is a separate decision: it is a log, and stays useful in a
+	// pipe.
+	bfs::Progress progress(!noProgress && bfs::ProgressIsUseful(), verbose);
+
 	try {
-		std::unique_ptr<bfs::Node> root = bfs::ScanSource(source, options.readAttributes);
-		bfs::BfsBuilder builder(options);
+		std::unique_ptr<bfs::Node> root = bfs::ScanSource(source,
+			options.readAttributes, progress);
+		bfs::BfsBuilder builder(options, progress);
 		builder.Build(*root, output);
 	} catch (const std::exception &error) {
+		progress.Finish();   // do not let the message land on a half-drawn line
 		fprintf(stderr, "makebfs: %s\n", error.what());
 		return 1;
 	}

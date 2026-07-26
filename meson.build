@@ -4,6 +4,7 @@ project('bfsutils', 'cpp',
 
 
 makebfs_sources = [
+	'src/Progress.cpp',
 	'src/ImageFile.cpp',
 	'src/BlockAllocator.cpp',
 	'src/DataStream.cpp',

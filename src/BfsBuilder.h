@@ -12,6 +12,7 @@
 #include "DataStream.h"
 #include "Geometry.h"
 #include "Node.h"
+#include "Progress.h"
 
 
 namespace bfs {
@@ -35,7 +36,7 @@ struct BuildOptions {
 // for the four-phase algorithm (plan/measure, geometry, place, serialize).
 class BfsBuilder {
 public:
-	explicit BfsBuilder(const BuildOptions &options);
+	BfsBuilder(const BuildOptions &options, Progress &progress);
 
 	void Build(Node &root, const std::string &outputPath);
 
@@ -92,6 +93,12 @@ private:
 	void ComputeGeometry();
 	void Place(BlockAllocator &allocator);
 
+	// Blocks the serialize phase will actually write, which is the denominator of
+	// the "writing" phase. This is deliberately not allocator.UsedBlocks(): that
+	// also counts the log area and the reserved prefix, which are never written,
+	// and would leave the phase stuck short of 100%.
+	int64_t BlocksToWrite() const;
+
 	void SerializeSuperBlock(ImageFile &image, int64_t usedBlocks,
 		const BlockRun &indicesRun);
 	void SerializeInode(ImageFile &image, InodePlan &plan);
@@ -108,6 +115,7 @@ private:
 	void WRun(uint8_t *p, const BlockRun &r) const {PutBlockRun(p, r, fOptions.byteOrder);}
 
 	BuildOptions fOptions;
+	Progress &fProgress;
 	Geometry fGeometry;
 	StreamTuning fTuning;
 	std::vector<InodePlan> fInodes;
