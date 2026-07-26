@@ -139,14 +139,25 @@ int64_t StreamMetadataUpperBound(const Geometry &geometry, int64_t dataBlocks,
 	int64_t rpb = RunsPerBlock(geometry);
 	int64_t groupSize = geometry.BlocksPerGroup();
 
-	// Indirect array: the run is rounded up to a power of two and the cursor is
-	// aligned to it, so its region is at most twice the rounded array size.
-	int64_t maxEntries = tuning.maxIndirectRuns + 2;   // + up to 2 alignment entries
-	int64_t arrayBlocks = (maxEntries + rpb - 1) / rpb;
-	int64_t indirectArray = 2 * std::min(NextPowerOfTwo(std::max<int64_t>(arrayBlocks, 1)),
-		groupSize);
-
 	int64_t runsUB = StreamRunsUpperBound(geometry, dataBlocks);
+	if (runsUB <= kNumDirectBlocks) {
+		return 0;   // the direct tier holds every run; no arrays are allocated
+	}
+
+	// Indirect array: only the runs past the direct tier are stored in it, so
+	// size it from this stream's run count rather than from the tier's capacity
+	// (that difference is the bulk of an image's wasted space -- most streams
+	// need no array at all). The run is rounded up to a power of two and the
+	// cursor is aligned to it, so its region is at most twice the rounded size.
+	int64_t indirectRuns = std::min(tuning.maxIndirectRuns, runsUB - kNumDirectBlocks);
+	int64_t indirectArray = 0;
+	if (indirectRuns > 0) {
+		int64_t maxEntries = indirectRuns + 2;   // + up to 2 alignment entries
+		int64_t arrayBlocks = (maxEntries + rpb - 1) / rpb;
+		indirectArray = 2 * std::min(NextPowerOfTwo(std::max<int64_t>(arrayBlocks, 1)),
+			groupSize);
+	}
+
 	if (runsUB <= kNumDirectBlocks + tuning.maxIndirectRuns) {
 		return indirectArray;   // no double-indirect tier
 	}
