@@ -244,6 +244,7 @@ bfsdump [options] <image>
 | `--max-entries N` | Cap entries per directory or tree. |
 | `--max-nodes N` | Cap nodes per `--btree-nodes` dump. |
 | `--max-data N` | Cap dumped blob bytes (default 256). |
+| `--resolve-values` | Name the inodes a B+tree's values point at (type, and path where one reaches them). |
 | `--replay-log` | Dump the post-replay state of an unclean volume. |
 | `--compact` | Single-line JSON (default: indented). |
 | `-o, --output FILE` | Write to `FILE` instead of stdout. |
@@ -264,6 +265,21 @@ directly, so it still works on a tree whose leaf chain is broken. The two agree
 by construction — a map's `entry_count` equals the node view's
 `stats.leaf_keys`, the remaining keys being internal separators.
 
+Every leaf value in either view is an inode number, and `--resolve-values` turns
+each one from a bare number into an object naming what it points at:
+
+```json
+{ "key": "application/x-Be.vnd.mimeset",
+  "values": [ { "inode": 131260, "type": "file", "path": "/beos/bin/mimeset" } ] }
+```
+
+The path is found by walking each inode's `parent` up to the root and naming
+every step in the directory above it, so it is the volume's own two records
+agreeing rather than a lookup: an inode a parent does not list back gets `type`
+but no `path`. So do the inodes nothing names — an index, which hangs off the
+superblock rather than a directory, and an attribute, which its owner references
+through the `attributes` run.
+
 Output is JSON on stdout, so it composes with `jq` and friends. A structure that
 cannot be read becomes an `"error"` or `"status"` member on its own section
 rather than aborting the run, so a damaged volume still yields a complete,
@@ -274,6 +290,7 @@ bfsdump payload.bfs                             # superblock
 bfsdump --index payload.bfs                     # what is indexed
 bfsdump --index=name --max-entries 20 data.bfs  # the name index, first 20 keys
 bfsdump --btree-nodes=/system data.bfs          # a directory tree's structure
+bfsdump --index=name --resolve-values data.bfs  # the name index, as paths
 bfsdump --inode /system/packages --attributes --data-stream /system/packages data.bfs
 bfsdump --compact --directory root data.bfs | jq '.directories[0].entries[].name'
 ```

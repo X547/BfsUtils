@@ -43,6 +43,8 @@ void PrintUsage(const char *program)
 		"      --max-entries N      cap entries per directory or tree\n"
 		"      --max-nodes N        cap nodes per --btree-nodes dump\n"
 		"      --max-data N         cap dumped blob bytes (default 256)\n"
+		"      --resolve-values     name the inodes a B+tree's values point at,\n"
+		"                           by type and by path where one reaches them\n"
 		"      --replay-log         dump the post-replay state of an unclean volume\n"
 		"      --compact            single-line JSON (default: indented)\n"
 		"  -o, --output FILE        write to FILE instead of stdout\n"
@@ -178,6 +180,8 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			options.maxData = atoll(value.c_str());
+		} else if (arg == "--resolve-values") {
+			options.resolveValues = true;
 		} else if (arg == "--replay-log") {
 			replayLog = true;
 		} else if (arg == "--compact") {

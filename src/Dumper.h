@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,7 @@ struct DumpOptions {
 	int64_t maxEntries = -1;   // -1 == unlimited
 	int64_t maxNodes = -1;
 	int64_t maxData = 256;
+	bool resolveValues = false;
 };
 
 
@@ -57,6 +59,14 @@ public:
 	void Dump();
 
 private:
+	// How much of a B+tree key a dump writes. The map dump keeps to the decoded
+	// key, which is what an entry is looked up by; the node dump also documents
+	// the bytes, being the view that accounts for a node's contents.
+	enum class KeyDetail {
+		Decoded,
+		WithBytes,
+	};
+
 	bool Wants(Section section) const;
 
 	int64_t ResolveInode(const std::string &spec);
@@ -68,8 +78,12 @@ private:
 	void WriteFlags(uint32_t flags);
 	void WriteTypeCode(const char *name, uint32_t type);
 	void WriteBlob(const std::vector<uint8_t> &data);
-	void WriteKey(uint32_t keyType, const TreeKey &key);
+	void WriteKey(uint32_t keyType, const TreeKey &key, KeyDetail detail);
 	void WriteAttributeList(const std::vector<Attribute> &attributes);
+	void WriteTreeValues(const std::vector<int64_t> &values);
+
+	const std::map<int64_t, std::string> &NamesIn(int64_t block);
+	const std::string &PathOf(int64_t block);
 
 	void DumpSuperblock();
 	void DumpInode(const std::string &spec);
@@ -89,6 +103,14 @@ private:
 	DumpOptions fOptions;
 	Geometry fGeo;
 	ByteOrder fOrder;
+
+	// Caches for --resolve-values, which asks the same questions over and over: a
+	// whole index's worth of values tends to live in a handful of directories, and
+	// every one of their paths shares the same ancestors. Both cache misses too --
+	// an empty name map for a directory that will not read, an empty path for an
+	// inode that cannot be reached -- so a damaged volume costs one attempt.
+	std::map<int64_t, std::map<int64_t, std::string>> fDirNames;
+	std::map<int64_t, std::string> fPaths;
 };
 
 

@@ -31,6 +31,29 @@ bool IsPrintable(const uint8_t *data, size_t length)
 }
 
 
+// Whether a key of this type and length has a decoded form the dump can write.
+// A numeric key is only meaningful at its natural width, and a key whose type is
+// not one BFS defines has no known form at all; either way only the raw bytes
+// describe such a key. Strings decode at any length.
+bool KeyDecodes(uint32_t keyType, uint16_t length)
+{
+	switch (keyType) {
+		case kBPlusTreeStringType:
+			return true;
+		case kBPlusTreeInt32Type:
+		case kBPlusTreeUInt32Type:
+		case kBPlusTreeFloatType:
+			return length == 4;
+		case kBPlusTreeInt64Type:
+		case kBPlusTreeUInt64Type:
+		case kBPlusTreeDoubleType:
+			return length == 8;
+		default:
+			return false;
+	}
+}
+
+
 // BFS type codes are four-character constants (see BFS_On-Disk_Format.md
 // section 8), so render the readable form alongside the number.
 bool FourCc(uint32_t type, std::string &out)
@@ -335,55 +358,62 @@ void Dumper::WriteBlob(const std::vector<uint8_t> &data)
 }
 
 
-void Dumper::WriteKey(uint32_t keyType, const TreeKey &key)
+void Dumper::WriteKey(uint32_t keyType, const TreeKey &key, KeyDetail detail)
 {
-	fJson.MemberUint("key_length", key.length);
-	fJson.MemberBytesHex("key_hex", key.data, key.length);
+	// A key that decodes is described by its decoded form, so the map dump shows
+	// only that and the node dump adds the bytes, being the view that accounts
+	// for what each node physically holds. A key that does not decode is
+	// described by its bytes alone, so those appear in either dump.
+	bool decodes = KeyDecodes(keyType, key.length);
+	if (!decodes || detail == KeyDetail::WithBytes) {
+		fJson.MemberUint("key_length", key.length);
+		fJson.MemberBytesHex("key_hex", key.data, key.length);
+	}
+	if (!decodes) {
+		return;
+	}
 
-	// Numeric keys are only meaningful at their natural width; anything else is
-	// left as the hex above rather than guessed at.
 	switch (keyType) {
 		case kBPlusTreeInt32Type:
-			if (key.length == 4) {
-				fJson.MemberInt("key", GetS32(key.data, fOrder));
-			}
+			fJson.MemberInt("key", GetS32(key.data, fOrder));
 			break;
 		case kBPlusTreeUInt32Type:
-			if (key.length == 4) {
-				fJson.MemberUint("key", GetU32(key.data, fOrder));
-			}
+			fJson.MemberUint("key", GetU32(key.data, fOrder));
 			break;
 		case kBPlusTreeInt64Type:
-			if (key.length == 8) {
-				fJson.MemberInt("key", GetS64(key.data, fOrder));
-			}
+			fJson.MemberInt("key", GetS64(key.data, fOrder));
 			break;
 		case kBPlusTreeUInt64Type:
-			if (key.length == 8) {
-				fJson.MemberUint("key", GetU64(key.data, fOrder));
-			}
+			fJson.MemberUint("key", GetU64(key.data, fOrder));
 			break;
-		case kBPlusTreeFloatType:
-			if (key.length == 4) {
-				uint32_t bits = GetU32(key.data, fOrder);
-				float value;
-				::memcpy(&value, &bits, sizeof(value));
-				fJson.MemberDouble("key", value);
-			}
+		case kBPlusTreeFloatType: {
+			uint32_t bits = GetU32(key.data, fOrder);
+			float value;
+			::memcpy(&value, &bits, sizeof(value));
+			fJson.MemberDouble("key", value);
 			break;
-		case kBPlusTreeDoubleType:
-			if (key.length == 8) {
-				uint64_t bits = GetU64(key.data, fOrder);
-				double value;
-				::memcpy(&value, &bits, sizeof(value));
-				fJson.MemberDouble("key", value);
-			}
+		}
+		case kBPlusTreeDoubleType: {
+			uint64_t bits = GetU64(key.data, fOrder);
+			double value;
+			::memcpy(&value, &bits, sizeof(value));
+			fJson.MemberDouble("key", value);
 			break;
+		}
+		case kBPlusTreeStringType: {
+			// An index stores a string attribute's value with the terminator it
+			// had in the attribute, while a directory stores a name without one.
+			// Drop the terminator so the two render alike; the node dump's
+			// 'key_length' and 'key_hex' say which form is on disk.
+			uint16_t length = key.length;
+			if (length > 0 && key.data[length - 1] == '\0') {
+				length--;
+			}
+			fJson.MemberString("key",
+				std::string(reinterpret_cast<const char *>(key.data), length));
+			break;
+		}
 		default:
-			if (IsPrintable(key.data, key.length)) {
-				fJson.MemberString("key",
-					std::string(reinterpret_cast<const char *>(key.data), key.length));
-			}
 			break;
 	}
 }
@@ -400,6 +430,111 @@ void Dumper::WriteAttributeList(const std::vector<Attribute> &attributes)
 		fJson.EndObject();
 	}
 	fJson.EndArray();
+}
+
+
+// Every leaf value in a BFS tree is an inode number (see BFS_On-Disk_Format.md
+// section 10, "Meaning of values"), so the plain form is the bare number and
+// --resolve-values turns each into an object naming the inode it stands for.
+void Dumper::WriteTreeValues(const std::vector<int64_t> &values)
+{
+	fJson.StartArray();
+	for (int64_t value : values) {
+		if (!fOptions.resolveValues) {
+			fJson.Int(value);
+			continue;
+		}
+
+		fJson.StartObject();
+		fJson.MemberInt("inode", value);
+		try {
+			Inode inode = fReader.ReadInode(value);
+			fJson.MemberString("type", ModeTypeName(inode.mode));
+			// An inode that no path reaches is reported by its number alone: an
+			// attribute, whose owner names it through the 'attributes' run rather
+			// than a directory entry, and an index, which hangs off the superblock,
+			// both land here, as does anything a damaged volume has orphaned.
+			const std::string &path = PathOf(value);
+			if (!path.empty()) {
+				fJson.MemberString("path", path);
+			}
+		} catch (const std::exception &error) {
+			fJson.MemberString("error", error.what());
+		}
+		fJson.EndObject();
+	}
+	fJson.EndArray();
+}
+
+
+const std::map<int64_t, std::string> &Dumper::NamesIn(int64_t block)
+{
+	auto found = fDirNames.find(block);
+	if (found != fDirNames.end()) {
+		return found->second;
+	}
+
+	std::map<int64_t, std::string> &names = fDirNames[block];
+	try {
+		Inode directory = fReader.ReadInode(block);
+		// Attribute and index directories are directories too, so an attribute or
+		// an index is named the same way an ordinary entry is.
+		if (directory.IsDirectory()) {
+			for (const DirEntry &entry : fReader.ReadDirectory(directory)) {
+				names.emplace(entry.inode, entry.name);
+			}
+		}
+	} catch (const std::exception &) {
+		// A directory that will not read names nothing. Reporting that is the
+		// caller's business -- it has the inode this was being asked about -- and
+		// the empty map is what says so.
+	}
+	return names;
+}
+
+
+// The path an inode is reachable by, walking 'parent' up to the root and naming
+// each step in the directory above it, or empty when some step has no name. The
+// two disagreeing is itself worth seeing: a parent that does not list the child
+// it claims is exactly the damage --resolve-values makes visible.
+const std::string &Dumper::PathOf(int64_t block)
+{
+	auto found = fPaths.find(block);
+	if (found != fPaths.end()) {
+		return found->second;
+	}
+	// Claim the slot before recursing, so a parent chain that loops back on itself
+	// resolves to this empty string instead of running until the stack ends. The
+	// slot stays empty for every other dead end too, which is what caches a
+	// failure; std::map keeps the reference valid across the recursion's inserts.
+	std::string &path = fPaths[block];
+
+	if (block == fGeo.ToBlock(fReader.RootDirectory())) {
+		path = "/";
+		return path;
+	}
+
+	int64_t parent;
+	try {
+		parent = fGeo.ToBlock(fReader.ReadInode(block).parent);
+	} catch (const std::exception &) {
+		return path;
+	}
+
+	const std::map<int64_t, std::string> &names = NamesIn(parent);
+	auto name = names.find(block);
+	if (name == names.end()) {
+		return path;
+	}
+	const std::string &parentPath = PathOf(parent);
+	if (parentPath.empty()) {
+		return path;
+	}
+
+	path = parentPath == "/"
+		? parentPath + name->second
+		: parentPath + "/" + name->second;
+	return path;
 }
 
 
@@ -867,28 +1002,19 @@ void Dumper::DumpBTreeMapBody(const Inode &inode, const std::vector<uint8_t> &tr
 			return false;
 		}
 		fJson.StartObject();
-		WriteKey(keyType, key);
+		WriteKey(keyType, key, KeyDetail::Decoded);
 
 		TreeValue value;
 		TreeStatus resolved = reader.ResolveValue(key.value, value);
-		fJson.MemberInt("value_raw", key.value);
-		if (value.kind == ValueKind::DuplicateNode) {
-			fJson.MemberString("duplicate_kind", "node");
-			fJson.MemberInt("container_offset", value.containerOffset);
-		} else if (value.kind == ValueKind::DuplicateFragment) {
-			fJson.MemberString("duplicate_kind", "fragment");
-			fJson.MemberInt("container_offset", value.containerOffset);
-			fJson.MemberInt("fragment_index", value.fragmentIndex);
-		}
+		// The leaf value itself is left out: it is either the inode number that
+		// 'values' already carries, or a tagged pointer to the duplicate container
+		// the inodes were read out of, and containers are what --btree-nodes is
+		// the view for.
 		if (resolved != TreeStatus::Ok) {
 			fJson.MemberString("value_status", TreeStatusName(resolved));
 		}
 		fJson.Key("values");
-		fJson.StartArray();
-		for (int64_t v : value.values) {
-			fJson.Int(v);
-		}
-		fJson.EndArray();
+		WriteTreeValues(value.values);
 		fJson.EndObject();
 
 		emitted++;
@@ -1008,7 +1134,7 @@ void Dumper::DumpBTreeNodesBody(const Inode &inode, const std::vector<uint8_t> &
 		for (const TreeKey &key : node.keys) {
 			fJson.StartObject();
 			fJson.MemberInt("key_offset", keyOffset);
-			WriteKey(keyType, key);
+			WriteKey(keyType, key, KeyDetail::WithBytes);
 			fJson.MemberInt("value_raw", key.value);
 
 			fJson.Key("value");
@@ -1041,11 +1167,7 @@ void Dumper::DumpBTreeNodesBody(const Inode &inode, const std::vector<uint8_t> &
 					fJson.MemberString("status", TreeStatusName(resolved));
 				}
 				fJson.Key("values");
-				fJson.StartArray();
-				for (int64_t v : value.values) {
-					fJson.Int(v);
-				}
-				fJson.EndArray();
+				WriteTreeValues(value.values);
 			}
 			fJson.EndObject();
 			fJson.EndObject();
