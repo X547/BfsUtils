@@ -778,6 +778,7 @@ void Checker::CheckIndexDirectory(int64_t block)
 	CheckBTree(tree, kBPlusTreeStringType, true, "indices", &entries);
 	for (const DirEntry &entry : entries) {
 		if (entry.name == "." || entry.name == "..") {
+			fFindings.Warning("dir", "index directory contains '.'/'..'", block, "indices");
 			continue;
 		}
 		CheckIndex(entry.inode, entry.name);

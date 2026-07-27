@@ -23,11 +23,16 @@ inline int64_t EncodeTime(int64_t seconds, uint32_t nanoseconds)
 		return value;
 	}
 
-	int64_t field = (static_cast<int64_t>(nanoseconds) + 16383) >> 14;
-	if (field > 0x0fff) {
-		field = 0x0fff;
+	// The >> 14 already positions the field in bits [15:4]; masking with
+	// kInodeTimeMask clears the low nibble, which the reference implementation
+	// fills with a uniqueness counter. Leaving it zero keeps output
+	// deterministic; duplicate index keys are handled by the tree builder.
+	// A legal nanosecond value tops out at 0xee60, clear of the reserved
+	// 0xf000 range, so only an out-of-range input needs guarding against.
+	if (nanoseconds > 999999999) {
+		nanoseconds = 999999999;
 	}
-	value |= (field << 4) & kInodeTimeMask;
+	value |= ((static_cast<int64_t>(nanoseconds) + 16383) >> 14) & kInodeTimeMask;
 	return value;
 }
 

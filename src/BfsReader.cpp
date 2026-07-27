@@ -204,7 +204,10 @@ BlockRun BfsReader::ResolveRun(const DataStreamInfo &stream, int64_t pos,
 {
 	uint32_t shift = fGeometry.blockShift;
 
-	if (stream.maxDirectRange == 0 || pos < stream.maxDirectRange) {
+	// The tier gate keys on max_indirect_range, not max_direct_range (see
+	// section 7): a stream with no indirect tier resolves everything in the
+	// direct runs whatever max_direct_range says.
+	if (stream.maxIndirectRange == 0 || pos < stream.maxDirectRange) {
 		int64_t end = 0;
 		for (int i = 0; i < kNumDirectBlocks; i++) {
 			if (stream.direct[i].IsZero()) {
@@ -220,7 +223,7 @@ BlockRun BfsReader::ResolveRun(const DataStreamInfo &stream, int64_t pos,
 		throw std::runtime_error("position beyond direct range");
 	}
 
-	if (pos < stream.maxIndirectRange) {
+	if (stream.maxDoubleIndirectRange == 0 || pos < stream.maxIndirectRange) {
 		std::vector<uint8_t> array = ReadRun(stream.indirect);
 		int64_t entries = static_cast<int64_t>(array.size()) / 8;
 		int64_t end = stream.maxDirectRange;

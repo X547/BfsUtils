@@ -597,7 +597,8 @@ int64_t Resizer::StreamPhysicalBlock(const DataStreamInfo &stream, int64_t logic
 	int shift = fGeo.blockShift;
 	int64_t pos = logicalBlock << shift;
 
-	if (stream.maxDirectRange == 0 || pos < stream.maxDirectRange) {
+	// Gate on max_indirect_range, matching BfsReader::ResolveRun and section 7.
+	if (stream.maxIndirectRange == 0 || pos < stream.maxDirectRange) {
 		int64_t end = 0;
 		for (int i = 0; i < kNumDirectBlocks; i++) {
 			if (stream.direct[i].IsZero()) {
@@ -612,7 +613,7 @@ int64_t Resizer::StreamPhysicalBlock(const DataStreamInfo &stream, int64_t logic
 		throw std::runtime_error("stream position beyond direct range");
 	}
 
-	if (pos < stream.maxIndirectRange) {
+	if (stream.maxDoubleIndirectRange == 0 || pos < stream.maxIndirectRange) {
 		std::vector<uint8_t> array = ReadRunBytes(stream.indirect);
 		int64_t entries = static_cast<int64_t>(array.size()) / 8;
 		int64_t end = stream.maxDirectRange;

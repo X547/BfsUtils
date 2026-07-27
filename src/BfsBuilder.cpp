@@ -490,8 +490,10 @@ void BfsBuilder::PlanIndices()
 		InodePlan &plan = fInodes[fIndexDirPlan];
 		// The index directory's tree is keyed by index name (a string), so it
 		// needs S_STR_INDEX just like a regular directory; without a key-type
-		// bit Haiku rejects an S_INDEX_DIR inode's tree as corrupt.
-		plan.mode = kSIndexDir | kSStrIndex | kSIfdir;
+		// bit Haiku rejects an S_INDEX_DIR inode's tree as corrupt. The
+		// permission bits are what tell the index root apart from an
+		// individual index, which carries none (see section 6/13).
+		plan.mode = kSIndexDir | kSStrIndex | kSIfdir | 0700u;
 		plan.uid = fInodes[fRootPlan].uid;
 		plan.gid = fInodes[fRootPlan].gid;
 		plan.createTime = fInodes[fRootPlan].createTime;
