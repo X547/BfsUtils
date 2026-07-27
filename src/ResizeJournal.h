@@ -13,6 +13,15 @@ namespace bfs {
 class ImageFile;
 
 
+// Where the sidecar journal for a target lives, absent an explicit override.
+// For a regular file it sits beside it. A device node cannot host a sidecar --
+// devfs is not writable -- so the journal goes into the current directory under
+// a name derived from the device path. That derivation must stay deterministic:
+// recovery on the next run finds the journal by recomputing this name, so a
+// temporary or randomized one would quietly defeat the crash-safety.
+std::string DefaultJournalPath(const std::string &imagePath, bool isDevice);
+
+
 // A sidecar write-ahead redo-journal that makes a set of block writes atomic
 // with respect to a crash. A transaction's blocks are written durably to the
 // journal file (with a validating footer) before being applied to the image;
@@ -21,7 +30,8 @@ class ImageFile;
 // is discarded, leaving the image in its pre-transaction state.
 class ResizeJournal {
 public:
-	explicit ResizeJournal(const std::string &imagePath);
+	// Takes the journal's own path (see DefaultJournalPath), not the image's.
+	explicit ResizeJournal(const std::string &journalPath);
 	~ResizeJournal();
 
 	ResizeJournal(const ResizeJournal &) = delete;

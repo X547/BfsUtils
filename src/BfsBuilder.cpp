@@ -833,6 +833,15 @@ void BfsBuilder::SerializeSuperBlock(ImageFile &image, int64_t usedBlocks,
 
 void BfsBuilder::Build(Node &root, const std::string &outputPath)
 {
+	// A device cannot be sized to fit, so the volume fills it unless an explicit
+	// size was asked for. ImageFile rejects an explicit size that does not fit.
+	if (fOptions.sizeOverride == 0) {
+		uint64_t deviceBytes = DeviceSizeOf(outputPath);
+		if (deviceBytes != 0) {
+			fOptions.sizeOverride = deviceBytes;
+		}
+	}
+
 	fProgress.BeginCountPhase("planning", "nodes", CountNodes(root));
 	fRootPlan = PlanNode(root, -1, true);
 
@@ -861,6 +870,31 @@ void BfsBuilder::Build(Node &root, const std::string &outputPath)
 
 	uint64_t imageBytes = static_cast<uint64_t>(fGeometry.numBlocks) * fGeometry.blockSize;
 	ImageFile image(outputPath, imageBytes, fGeometry.blockSize);
+
+	if (image.IsDevice()) {
+		// A fresh sparse file reads as zeroes everywhere the builder does not
+		// write; a device holds whatever the previous volume left. Two regions are
+		// never written and must be cleared explicitly:
+		//
+		//  - block 0 outside the superblock: an old boot sector, and the ext2
+		//    superblock at offset 1024 that Haiku scrubs when it formats. Left
+		//    behind, they make the volume ambiguous to anything that probes it.
+		//  - the log area, which is only reserved and pointed at. Format leaves it
+		//    empty (log_start == log_end), so a driver never replays it, but stale
+		//    log entries have no business sitting there.
+		image.ZeroRange(0, fGeometry.blockSize);
+		image.ZeroRange(
+			static_cast<uint64_t>(fGeometry.ToBlock(fGeometry.logBlocks))
+				* fGeometry.blockSize,
+			static_cast<uint64_t>(fGeometry.logBlocks.length) * fGeometry.blockSize);
+
+		if (fOptions.zeroFree) {
+			// Free data blocks keep the old volume's contents. That is invisible to
+			// BFS -- nothing reads an unallocated block -- but it does leave the
+			// previous filesystem's data recoverable on the device.
+			image.ZeroRange(0, imageBytes);
+		}
+	}
 
 	BlockRun indicesRun;
 	if (fIndexDirPlan >= 0) {

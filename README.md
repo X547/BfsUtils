@@ -27,6 +27,30 @@ Both work with the on-disk layout described in
 source is consulted. On non-Haiku POSIX platforms, attributes are ignored in
 both directions; on Haiku they are preserved.
 
+## Images and devices
+
+Everywhere these tools take an image file they also take a **block device**, on
+Linux and on Haiku. The differences worth knowing:
+
+- The volume's size comes from the device, not from `stat`: `BLKGETSIZE64` on
+  Linux, `B_GET_GEOMETRY` on Haiku. On Haiku a whole disk (`.../raw`) is a
+  *character* device and each partition on it a *block* device; both work.
+- `makebfs` fills the whole device unless `--size` says otherwise, and refuses a
+  size that does not fit.
+- A device holds the previous volume's bytes where a fresh image file would read
+  as zeroes, so `makebfs` explicitly clears block 0 (old boot sector, and the
+  ext2 superblock at offset 1024) and the log area. Free space keeps its old
+  contents unless `--zero-free` is given.
+- `bfsresize --max` resizes the volume to fill the device (or, for an image
+  file, its current length).
+- **Writing to a mounted device is refused.** Read-only tools (`bfscheck`,
+  `bfsdump`, `bfsextract`, `bfsmap`) work on a mounted device, though what they
+  read is a moving target if it is being written to.
+
+To try this without real hardware, Haiku can register an image as a device with
+`diskimage register <file>` (and `diskimage unregister <file>`); on Linux the
+equivalent is `losetup --find --show <file>`.
+
 ## Building
 
 The project uses [Meson](https://mesonbuild.com/):
@@ -42,8 +66,9 @@ Haiku. Attribute archiving is compiled in only under `__HAIKU__`.
 `bfsmap` links against **libpng** and `bfsdump` against **RapidJSON** (both found
 via `pkg-config`); the other tools have no external dependencies. Install the
 development headers first — for example `libpng-dev` and `rapidjson-dev` on
-Debian/Ubuntu, `libpng_devel` on Haiku. RapidJSON is header-only, so it costs
-nothing at run time.
+Debian/Ubuntu, `libpng16_devel` and `rapidjson` on Haiku. RapidJSON is
+header-only, so it costs nothing at run time. Both are **optional**: if either is
+missing, that one tool is skipped and the rest still build.
 
 On the remote Haiku machine (see `local/ENVIRONMENT.md`):
 
@@ -55,11 +80,14 @@ meson setup build && ninja -C build
 ## Usage
 
 ```
-makebfs [options] <source-directory> <output-image>
+makebfs [options] <source-directory> <output-image|device>
 
   -b, --block-size N   block size: 1024, 2048, 4096, or 8192 (default 2048)
-  -s, --size BYTES     total image size; accepts K/M/G suffixes
-                       (default: smallest image that fits the content)
+  -s, --size BYTES     total volume size; accepts K/M/G suffixes
+                       (default: smallest image that fits the content,
+                       or, on a device, the whole device)
+      --zero-free      zero the device first, so no trace of the previous
+                       contents survives in free space (slow)
   -n, --name NAME      volume name (default: source directory name)
       --endian ORDER   on-disk byte order: little (default) or big
       --no-index       do not generate the standard BFS indices
@@ -162,14 +190,18 @@ bfscheck payload.bfs
 ### `bfsresize`
 
 ```
-bfsresize [options] <image> <new-size>
+bfsresize [options] <image|device> <new-size>
+bfsresize [options] --max <image|device>
 
-  -n, --dry-run   report the plan without modifying the image
-  -v, --verbose   verbose output
+  -m, --max            resize to fill the device, or the image file's
+                       current length; use instead of <new-size>
+      --journal PATH   keep the sidecar journal here
+  -n, --dry-run        report the plan without modifying the volume
+  -v, --verbose        verbose output
   -h, --help
 ```
 
-`bfsresize` grows or shrinks a BFS image in place (`<new-size>` in bytes, with
+`bfsresize` grows or shrinks a BFS volume in place (`<new-size>` in bytes, with
 K/M/G suffixes, rounded down to a block multiple; `ag_shift` is held fixed). It
 is **crash-safe**: every on-disk change is applied through a sidecar redo-journal
 (`<image>.bfsresize-journal`) with fsync barriers, and the file is only truncated
@@ -177,6 +209,13 @@ after the superblock commit is durable — so an interruption always leaves a
 mountable volume (the old size until the final commit), and the transaction is
 replayed automatically on the next run. A dirty (uncleanly unmounted) volume is
 refused.
+
+A device cannot host a sidecar file, so when resizing one the journal goes to the
+current directory under a name derived from the device path (or wherever
+`--journal` says). The name is deterministic on purpose: recovery finds the
+journal by recomputing it, so a temporary name would defeat the crash-safety.
+Shrinking a device leaves its tail addressed by nothing rather than truncating,
+and growing past its end is refused.
 
 Supported today:
 

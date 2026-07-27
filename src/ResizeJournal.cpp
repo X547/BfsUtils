@@ -40,8 +40,25 @@ uint64_t Fnv1a(const uint8_t *data, size_t length)
 } // unnamed namespace
 
 
-ResizeJournal::ResizeJournal(const std::string &imagePath):
-	fPath(imagePath + ".bfsresize-journal")
+std::string DefaultJournalPath(const std::string &imagePath, bool isDevice)
+{
+	if (!isDevice) {
+		return imagePath + ".bfsresize-journal";
+	}
+	// "/dev/disk/ata/0/master/0" -> "./dev_disk_ata_0_master_0.bfsresize-journal"
+	std::string name;
+	for (char c : imagePath) {
+		name += (c == '/' || c == '\\') ? '_' : c;
+	}
+	while (!name.empty() && name.front() == '_') {
+		name.erase(name.begin());
+	}
+	return "./" + name + ".bfsresize-journal";
+}
+
+
+ResizeJournal::ResizeJournal(const std::string &journalPath):
+	fPath(journalPath)
 {
 	fFd = ::open(fPath.c_str(), O_RDWR | O_CREAT, 0644);
 	if (fFd < 0) {

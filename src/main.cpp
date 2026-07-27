@@ -19,14 +19,19 @@ namespace {
 void PrintUsage(const char *program)
 {
 	fprintf(stderr,
-		"Usage: %s [options] <source-directory> <output-image>\n"
+		"Usage: %s [options] <source-directory> <output-image|device>\n"
 		"\n"
-		"Generate a fresh BFS image containing the given directory tree.\n"
+		"Generate a fresh BFS volume containing the given directory tree, in an\n"
+		"image file or on a block device. Writing to a device overwrites whatever\n"
+		"it holds.\n"
 		"\n"
 		"Options:\n"
 		"  -b, --block-size N   block size: 1024, 2048, 4096, or 8192 (default 2048)\n"
-		"  -s, --size BYTES     total image size; accepts K/M/G suffixes\n"
-		"                       (default: smallest image that fits the content)\n"
+		"  -s, --size BYTES     total volume size; accepts K/M/G suffixes\n"
+		"                       (default: smallest image that fits the content,\n"
+		"                       or, on a device, the whole device)\n"
+		"      --zero-free      zero the device first, so no trace of the previous\n"
+		"                       contents survives in free space (slow)\n"
 		"  -n, --name NAME      volume name (default: source directory name)\n"
 		"      --endian ORDER   on-disk byte order: little (default) or big\n"
 		"      --no-index       do not generate the standard BFS indices\n"
@@ -108,6 +113,8 @@ int main(int argc, char **argv)
 		if (arg == "-h" || arg == "--help") {
 			PrintUsage(argv[0]);
 			return 0;
+		} else if (arg == "--zero-free") {
+			options.zeroFree = true;
 		} else if (arg == "--no-index") {
 			options.generateIndices = false;
 		} else if (arg == "--no-attributes") {

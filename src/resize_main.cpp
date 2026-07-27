@@ -13,19 +13,26 @@ namespace {
 void PrintUsage(const char *program)
 {
 	fprintf(stderr,
-		"Usage: %s [options] <image> <new-size>\n"
+		"Usage: %s [options] <image|device> <new-size>\n"
+		"       %s [options] --max <image|device>\n"
 		"\n"
-		"Resize a BFS image in place (grow or shrink). Crash-safe via a sidecar\n"
-		"redo-journal: an interrupted resize leaves a mountable volume and can be\n"
-		"re-run to completion.\n"
+		"Resize a BFS volume in place (grow or shrink), in an image file or on a\n"
+		"block device. Crash-safe via a sidecar redo-journal: an interrupted resize\n"
+		"leaves a mountable volume and can be re-run to completion.\n"
 		"\n"
 		"<new-size> is in bytes and accepts K/M/G suffixes (rounded down to a\n"
 		"block multiple).\n"
 		"\n"
 		"Options:\n"
-		"  -n, --dry-run   report the plan without modifying the image\n"
-		"  -v, --verbose   verbose output\n"
-		"  -h, --help      show this help\n",
+		"  -m, --max            resize to fill the device, or the image file's\n"
+		"                       current length; use instead of <new-size>\n"
+		"      --journal PATH   keep the sidecar journal here. Defaults to\n"
+		"                       <image>.bfsresize-journal, or, for a device, a\n"
+		"                       name derived from it in the current directory\n"
+		"  -n, --dry-run        report the plan without modifying the volume\n"
+		"  -v, --verbose        verbose output\n"
+		"  -h, --help           show this help\n",
+		program,
 		program);
 }
 
@@ -71,6 +78,7 @@ int main(int argc, char **argv)
 	bfs::ResizeOptions options;
 	std::string imagePath;
 	std::string sizeText;
+	bool useMax = false;
 
 	for (int i = 1; i < argc; i++) {
 		std::string arg = argv[i];
@@ -81,6 +89,17 @@ int main(int argc, char **argv)
 			options.dryRun = true;
 		} else if (arg == "-v" || arg == "--verbose") {
 			options.verbose = true;
+		} else if (arg == "-m" || arg == "--max") {
+			useMax = true;
+		} else if (arg == "--journal" || arg.rfind("--journal=", 0) == 0) {
+			if (arg.size() > 9 && arg[9] == '=') {
+				options.journalPath = arg.substr(10);
+			} else if (i + 1 < argc) {
+				options.journalPath = argv[++i];
+			} else {
+				fprintf(stderr, "%s: --journal needs a path\n", argv[0]);
+				return 1;
+			}
 		} else if (!arg.empty() && arg[0] == '-') {
 			fprintf(stderr, "%s: unknown option '%s'\n", argv[0], arg.c_str());
 			PrintUsage(argv[0]);
@@ -95,19 +114,26 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (imagePath.empty() || sizeText.empty()) {
+	if (imagePath.empty() || (sizeText.empty() != useMax)) {
+		// Exactly one of <new-size> and --max must be given.
 		PrintUsage(argv[0]);
 		return 1;
 	}
 
 	uint64_t newSize = 0;
-	if (!ParseSize(sizeText, newSize)) {
+	if (!useMax && !ParseSize(sizeText, newSize)) {
 		fprintf(stderr, "%s: invalid size '%s'\n", argv[0], sizeText.c_str());
 		return 1;
 	}
 
 	try {
 		bfs::Resizer resizer(imagePath, options);
+		if (useMax) {
+			newSize = resizer.MaxSizeBytes();
+			printf("Filling %s: %llu bytes.\n",
+				resizer.TargetIsDevice() ? "device" : "image file",
+				static_cast<unsigned long long>(newSize));
+		}
 		resizer.Run(newSize);
 	} catch (const std::exception &error) {
 		fprintf(stderr, "bfsresize: %s\n", error.what());

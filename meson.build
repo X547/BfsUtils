@@ -6,6 +6,7 @@ project('bfsutils', 'cpp',
 makebfs_sources = [
 	'src/Progress.cpp',
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BlockAllocator.cpp',
 	'src/DataStream.cpp',
 	'src/SmallData.cpp',
@@ -22,6 +23,7 @@ executable('makebfs', makebfs_sources,
 
 bfsextract_sources = [
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BfsReader.cpp',
 	'src/BPlusTreeReader.cpp',
 	'src/AttributeWriter.cpp',
@@ -35,6 +37,7 @@ executable('bfsextract', bfsextract_sources,
 
 bfscheck_sources = [
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BfsReader.cpp',
 	'src/BPlusTreeReader.cpp',
 	'src/Findings.cpp',
@@ -48,6 +51,7 @@ executable('bfscheck', bfscheck_sources,
 
 bfsresize_sources = [
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BfsReader.cpp',
 	'src/BPlusTreeReader.cpp',
 	'src/ResizeJournal.cpp',
@@ -59,10 +63,14 @@ executable('bfsresize', bfsresize_sources,
 	install : true)
 
 
-libpng_dep = dependency('libpng')
+# bfsmap and bfsdump each need a third-party library. They are optional so that
+# the four core tools still build where those are unavailable -- notably Haiku,
+# where the package set is thinner than a typical Linux distribution's.
+libpng_dep = dependency('libpng', required : false)
 
 bfsmap_sources = [
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BfsReader.cpp',
 	'src/BPlusTreeReader.cpp',
 	'src/BlockMap.cpp',
@@ -71,9 +79,13 @@ bfsmap_sources = [
 	'src/map_main.cpp',
 ]
 
-executable('bfsmap', bfsmap_sources,
-	dependencies : [libpng_dep],
-	install : true)
+if libpng_dep.found()
+	executable('bfsmap', bfsmap_sources,
+		dependencies : [libpng_dep],
+		install : true)
+else
+	message('libpng not found -- skipping bfsmap')
+endif
 
 
 # RapidJSON is header-only and ships its pkg-config file under either spelling
@@ -81,11 +93,12 @@ executable('bfsmap', bfsmap_sources,
 # do not trip this project's warning level.
 rapidjson_dep = dependency('RapidJSON', required : false)
 if not rapidjson_dep.found()
-	rapidjson_dep = dependency('rapidjson')
+	rapidjson_dep = dependency('rapidjson', required : false)
 endif
 
 bfsdump_sources = [
 	'src/ImageFile.cpp',
+	'src/MountCheck.cpp',
 	'src/BfsReader.cpp',
 	'src/BPlusTreeReader.cpp',
 	'src/JsonWriter.cpp',
@@ -93,6 +106,10 @@ bfsdump_sources = [
 	'src/dump_main.cpp',
 ]
 
-executable('bfsdump', bfsdump_sources,
-	dependencies : [rapidjson_dep.as_system('system')],
-	install : true)
+if rapidjson_dep.found()
+	executable('bfsdump', bfsdump_sources,
+		dependencies : [rapidjson_dep.as_system('system')],
+		install : true)
+else
+	message('RapidJSON not found -- skipping bfsdump')
+endif

@@ -30,7 +30,9 @@ Resizer::Resizer(const std::string &imagePath, const ResizeOptions &options):
 	fImagePath(imagePath),
 	fOptions(options),
 	fImage(imagePath, ImageFile::Access::ReadWrite),
-	fJournal(imagePath),
+	fJournal(options.journalPath.empty()
+		? DefaultJournalPath(imagePath, fImage.IsDevice())
+		: options.journalPath),
 	fReader((RecoverJournal(fJournal, fImage), fImage)),
 	fGeo(fReader.GetGeometry()),
 	fUsedBlocks(fReader.UsedBlocks())

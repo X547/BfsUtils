@@ -21,6 +21,8 @@ namespace bfs {
 struct ResizeOptions {
 	bool dryRun = false;
 	bool verbose = false;
+	// Overrides where the sidecar journal is kept. Empty means DefaultJournalPath.
+	std::string journalPath;
 };
 
 
@@ -35,6 +37,11 @@ public:
 	// Resize to 'newSizeBytes' (rounded down to a block multiple). Returns the
 	// number of blocks relocated.
 	int64_t Run(uint64_t newSizeBytes);
+
+	// The largest volume the target can hold: the device's size, or the image
+	// file's current length. This is what --max resizes to.
+	uint64_t MaxSizeBytes() const {return fImage.Size();}
+	bool TargetIsDevice() const {return fImage.IsDevice();}
 
 private:
 	int64_t Reserved(int64_t bitmapBlocks) const;

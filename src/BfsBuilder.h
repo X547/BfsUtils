@@ -27,7 +27,8 @@ struct BuildOptions {
 	std::string volumeName = "bfs";
 	bool generateIndices = true;
 	bool readAttributes = false;   // effective on Haiku
-	uint64_t sizeOverride = 0;     // 0 == smallest possible image
+	uint64_t sizeOverride = 0;     // 0 == smallest possible image, or fill a device
+	bool zeroFree = false;         // zero the whole target first (devices only)
 	ByteOrder byteOrder = ByteOrder::Little;   // on-disk byte order to write
 };
 
