@@ -620,9 +620,11 @@ void Checker::CheckInode(int64_t block, const std::string &path, int64_t expecte
 		}
 	} else if (inode.IsRegularFile()) {
 		// nothing beyond the data stream
+	} else if (inode.IsSpecialFile()) {
+		// sockets and FIFOs carry no data of their own
 	} else {
 		fFindings.Warning("mode",
-			"inode in the directory hierarchy is not a file, dir, or symlink",
+			"inode in the directory hierarchy is not a file, dir, symlink, socket, or FIFO",
 			block, path);
 	}
 }

@@ -66,9 +66,11 @@ constexpr uint32_t kSDoubleIndex = 00001000000u;
 constexpr uint32_t kSAllowDups = 00002000000u;
 
 constexpr uint32_t kSIfmt = 00000170000u;
+constexpr uint32_t kSIfsock = 00000140000u;
 constexpr uint32_t kSIflnk = 00000120000u;
 constexpr uint32_t kSIfreg = 00000100000u;
 constexpr uint32_t kSIfdir = 00000040000u;
+constexpr uint32_t kSIfifo = 00000010000u;
 
 // small_data.
 constexpr uint32_t kFileNameType = 0x43535452;  // 'CSTR'

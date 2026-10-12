@@ -51,6 +51,16 @@ struct Inode {
 	{
 		return (mode & (kSIfmt | kSAttrDir | kSAttr | kSIndexDir)) == kSIfreg;
 	}
+	// Sockets and FIFOs: valid hierarchy entries without file data. BFS does
+	// not allow device nodes.
+	bool IsSpecialFile() const
+	{
+		if ((mode & (kSAttrDir | kSAttr | kSIndexDir)) != 0) {
+			return false;
+		}
+		uint32_t format = mode & kSIfmt;
+		return format == kSIfsock || format == kSIfifo;
+	}
 	bool IsLongSymlink() const {return (flags & kInodeLongSymlink) != 0;}
 };
 
